@@ -56,10 +56,55 @@ out: {"type":"escape","strength":0-1,"side":"left"|"right","spikes":[22 counts]}
 
 Optional extras: `{"type":"ping"}` → `pong` · `{"type":"status"}` →
 mode/source/timings/group names (plus `sound_live`, `sound_fallback`,
-`hold_ms`, `gather_ms`, `merged`, `bad_requests`) · `{"type":"reset"}` (new
-round; also clears both senses) → `reset_ok` ·
-`{"type":"mode","mode":"live"|"fallback"|"auto"}` → `mode_ok`. Any request
-may carry `"id"`; the reply echoes it.
+`hold_ms`, `gather_ms`, `merged`, `bad_requests`, `habituation`, `efficacy`)
+· `{"type":"reset"}` (new round; clears both senses and the habituation:
+a fresh fly) → `reset_ok` · `{"type":"mode","mode":"live"|"fallback"|"auto"}`
+→ `mode_ok` · `{"type":"habituation","enabled":true|false}` →
+`habituation_ok` (on by default; see below). Any request may carry `"id"`;
+the reply echoes it.
+
+## Habituation: the fly gets used to repeated threats
+
+Repeat the same threat and the fly reacts less each time; leave it alone
+for a few seconds and it's fresh again. So players can wear it down with
+fake swings, then strike. It's on by default (`--habituation off` or
+`{"type":"habituation","enabled":false}` turns it off), needs nothing new
+from Unity, and the reply format doesn't change.
+
+**How it works** (`habituation.py`): short-term fatigue of the sensory
+synapses. Each input channel (left eye, right eye, left ear, right ear)
+has a synaptic resource that strong input uses up and that recovers with
+a 3 s time constant. The channel's outgoing synapses run at an efficacy
+that follows the resource with a 1.2 s lag.
+
+- **Only strong input fatigues** (looming or sound above 0.4). The game's
+  looming value includes weak, sustained threats: the swatter held nearby
+  (≤0.45), aiming at the fly (0.3), the player close by (0.3), the flashlight
+  (≤0.4), headlights (0.3). Those never wear the fly down. Swings, loud hits
+  and breaking glass (short pulses of 0.6–1.0) do.
+- **Channel-specific**: noise on the left ear dulls the left ear only, not
+  the eyes or the right ear.
+- **The lag** keeps the first threat of a series at full strength. Without
+  it, a single 0.3 s swing already weakened its own response by ~20%.
+- **Real time**: recovery runs on the wall clock, so the fly recovers even
+  while the game sends nothing.
+- **Survives brain switches**: the live brain and the fallback run the same
+  model and hand the state over when they switch.
+- **Parameters** (`USE` 0.12, `TAU_S` 3 s, `THRESHOLD` 0.4, `LAG_S` 1.2 s)
+  were chosen for gameplay, not fitted to fly data.
+
+Measured through the server in real time (subnet_t5, events 1.5 s apart):
+
+| | Fresh fly | After repeats |
+|---|---|---|
+| Breaking glass ×6 (sound 1.0, 0.35 s) | 0.91–0.94 | 0.42–0.43 by the 6th |
+| Fake swings ×5 (looming 0.8, 0.3 s) | 0.65–0.72 | 0.33–0.34 |
+| Real strike (looming 1.0) | 0.90–1.00 | 0.36–0.46 after the 5 fake swings |
+| Glass after 6 s of silence | | 0.88–0.98 (recovered) |
+| Eye swing right after 6 ear-only glass breaks | 0.73–0.76 | 0.65–0.88 (eye efficacy stays 1.0; the spread is normal run-to-run noise) |
+
+The left ear's efficacy reads 0.35–0.38 after the 6 breaks; eyes and
+right ear stay at 1.0 (`efficacy` in `status`).
 
 ## For the Unity side: adding sound
 
@@ -88,6 +133,10 @@ the same, and spike indices 0–18 mean what they did.
    counts twice: once through the eyes, once through the ears.
 6. **Errors**: a malformed message gets `{"type":"error","error":"..."}`
    (with your `id`). Ignore or log it; don't treat it as an escape.
+7. **Habituation needs nothing from you.** Send `reset` at the start of each
+   round so every round starts with a fresh fly. Optional: show
+   `status.efficacy` on the neuron panel, or turn habituation off with
+   `{"type":"habituation","enabled":false}`.
 
 ## Run it
 
@@ -102,8 +151,8 @@ Flags: `--subnet brain/subnet/subnet_t10.npz` (smaller network), `--port`,
 `--no-listen` (hub only), `--timeout-ms 200` (live deadline in auto mode),
 `--spin-ms 100` (see below), `--hold-ms 100` (how long a looming/sound value
 keeps counting), `--gather-ms 3` (messages this close together share one
-decision; 0 = decide on every message), `--debug` (enables a stall command
-for testing).
+decision; 0 = decide on every message), `--habituation on|off` (default
+on), `--debug` (enables a stall command for testing).
 
 `brain/subnet/` is committed (≈360 KB), so the server and the Pi need **no
 connectome download**. Rebuilding it needs the raw data (≈135 MB):
@@ -208,6 +257,10 @@ connectome download**. Rebuilding it needs the raw data (≈135 MB):
   while it runs (`timeBeginPeriod(1)`), which brought it back to 16 ms. QNX
   and Linux don't need this. `--gather-ms 0` turns merging off (then a
   same-frame pair is usually two 50 ms decisions).
+- **Reset can't be lost any more.** `reset` used to be queued under the
+  connection's own slot, so a looming sent right after it (same frame)
+  superseded it: no reset and no `reset_ok`. It now gets its own slot and
+  still runs first.
 - **Spin-wait.** When the CPU idles between 20 Hz requests, Windows drops its
   clock and the next decision takes ~2× longer (22 → 42 ms measured). The
   worker busy-waits up to `--spin-ms` (default 100) for the next request. That
@@ -219,7 +272,8 @@ connectome download**. Rebuilding it needs the raw data (≈135 MB):
 `ws://127.0.0.1:8765`; point it at a hub to test through the hub).
 
 ```sh
-python brain/bench.py all        # smoke, validate, looming sweep, sound, mixed 20 Hz, latency, reconnect, 90 s run
+python brain/bench.py all        # smoke, validate, looming sweep, sound, habituation, mixed 20 Hz, latency, reconnect, 90 s run
+python brain/bench.py habituation  # repeats wear it down, quiet restores it, reset, on/off, fallback (~70 s)
 python brain/bench.py long --seconds 600
 python brain/bench.py modes      # fallback vs live (looming, sound, mixed), mode switches, failover (server --debug)
 python brain/bench.py speed      # no server: time each subnetwork (run this on the Pi)
@@ -247,6 +301,19 @@ Laptop results with sound (Windows, Python 3.10, NumPy 1.26, `subnet_t5`, 2,264 
 | No NumPy | Starts on fallback; sound and mixed all pass |
 | 90 s run | Memory 58 MB flat (was 46 MB with the smaller network); round trip 21 ms flat |
 | Long run (10 min, before sound) | Memory flat at 46–47 MB; round trip 14 → 13 ms (not re-run with sound) |
+
+With habituation (on by default; the steady-state sweeps and the
+fallback-parity test turn it off while they measure the fresh brain):
+
+| Test | Result |
+|---|---|
+| Habituation off | Bit-identical to the version before habituation (live: 300 mixed decisions; fallback: 400) |
+| `bench.py habituation`, live | Wear-down, recovery after 6 s of no messages, channel specificity, the fake-swings-then-strike tactic, reset (also when a looming follows in the same frame), on/off toggle: all pass (numbers in the habituation section) |
+| Same, fallback only (no NumPy) | 6× glass 0.89 → 0.32, recovers to 0.84; all pass |
+| Live ↔ fallback switch | Left-ear efficacy 0.375 live → 0.375 fallback → 0.381 live again |
+| Full `all` + `modes` with it on | All pass. Strength step at a mode switch 0.11 (noise 0.21); stall: longest silence 224 ms |
+| Cost | +1.3 ms per decision (13.5 → 14.9 ms median, interleaved): rewriting the input synapses' efficacy each window. Looming round trip p50 19 / p95 23 ms |
+| Through the dev hub | `habituation` is routed; 4× glass 0.97 → 0.38 |
 
 ## On the QNX Pi
 

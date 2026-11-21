@@ -18,6 +18,8 @@ Extras (all optional):
   {"type":"status"} -> {"type":"status", mode, source, group_names, ...}
   {"type":"reset"}  -> brain state cleared (new round), {"type":"reset_ok"}
   {"type":"mode","mode":"live"|"fallback"|"auto"} -> switch at runtime
+  {"type":"habituation","enabled":true|false} -> {"type":"habituation_ok"}
+      (on by default: the fly gets used to repeated threats; see habituation.py)
   Any request may carry "id"; the reply echoes it (for round-trip timing).
 
 Brains:
@@ -118,6 +120,7 @@ class BrainWorker(threading.Thread):
         self.coalesced = 0
         self.recent = deque(maxlen=200)
         self.last_ms = 0.0
+        self.last_decide_t = None
 
     def submit(self, key, job, deliver):
         with self.cond:
@@ -161,19 +164,32 @@ class BrainWorker(threading.Thread):
                 op = job["op"]
                 if op == "reset":
                     self.brain.reset()
+                    self.last_decide_t = None
                     out = {"type": "reset_ok"}
                 elif op == "sync":      # resume from the fallback's last output
                     self.brain.drive_ema = job["strength"] * self.brain.full_drive
                     self.brain.jump = job["side"]
+                    if job.get("hab"):
+                        self.brain.load_habituation(job["hab"])
+                    self.last_decide_t = time.perf_counter()
                     out = {"type": "sync_ok"}
+                elif op == "habituation":
+                    self.brain.set_habituation(job["enabled"])
+                    out = {"type": "habituation_ok"}
                 elif op == "stall":                     # --debug only
                     time.sleep(job["ms"] / 1000.0)
                     out = {"type": "stall_ok"}
                 else:
+                    # Real time since the previous decision, so habituation
+                    # also recovers while the game sends nothing.
+                    now = time.perf_counter()
+                    elapsed = None if self.last_decide_t is None else now - self.last_decide_t
+                    self.last_decide_t = now
                     r = self.brain.decide(job["looming"], job["side"],
-                                          job["sound"], job["sound_side"])
+                                          job["sound"], job["sound_side"], elapsed_s=elapsed)
                     out = {"type": "escape", "strength": r["strength"],
-                           "side": r["side"], "spikes": r["spikes"]}
+                           "side": r["side"], "spikes": r["spikes"],
+                           "hab": r["hab"]}      # internal; stripped before sending
                     self.decisions += 1
                     dt = time.perf_counter() - t0
                     self.last_ms = dt * 1000
@@ -250,6 +266,11 @@ class BrainServer:
         self.gathering = {}         # conn key -> Request waiting for its window
         self.merged = 0             # messages folded into a later one's decision
         self.bad_requests = 0
+        # Habituation: both brains run the same model; whichever answers keeps
+        # the other in step (sync), so switching doesn't reset the fatigue.
+        self.habituation = (live or fallback).hab.enabled
+        self.last_hab = None        # live brain's state after its last decision
+        self._fb_last_t = None      # when the fallback's state was last current
         names = (live or fallback).group_names
         if live and fallback and list(fallback.group_names) != list(live.group_names):
             log("WARNING: lookup table groups differ from the live subnetwork; "
@@ -287,6 +308,8 @@ class BrainServer:
               "sound_fallback": bool(self.fallback is not None and self.fallback.has_sound),
               "hold_ms": self.hold_s * 1000, "gather_ms": self.gather_s * 1000,
               "merged": self.merged, "bad_requests": self.bad_requests,
+              "habituation": self.habituation,
+              "efficacy": self._efficacy(),
               "uptime_s": round(time.monotonic() - self.started, 1)}
         if self.live:
             st.update(subnet=self.live.path.name, neurons=self.live.n,
@@ -297,10 +320,27 @@ class BrainServer:
                       avg_step_ms=round(w.avg_step_ms(), 2))
         return st
 
+    def _efficacy(self):
+        """Synaptic efficacy per input channel (1 = fresh) of whichever brain
+        is answering."""
+        if self.source() == "live" and self.last_hab:
+            snap = self.last_hab
+        elif self.fallback is not None:
+            snap = self.fallback.hab.snapshot()
+        elif self.live is not None:
+            snap = self.live.hab.snapshot()   # nothing decided yet: fresh
+        else:
+            return {}
+        return {c: round(v, 3) for c, v in snap["e"].items()}
+
     # --- answering -----------------------------------------------------------
     def _fallback_reply(self, req):
         j = req.job
-        out = self.fallback.decide(j["looming"], j["side"], j["sound"], j["sound_side"])
+        now = time.perf_counter()
+        elapsed = None if self._fb_last_t is None else now - self._fb_last_t
+        self._fb_last_t = now
+        out = self.fallback.decide(j["looming"], j["side"], j["sound"], j["sound_side"],
+                                   elapsed_s=elapsed)
         self.fallback_replies += 1
         return out
 
@@ -308,6 +348,9 @@ class BrainServer:
         req.answered = True
         if req.timer:
             req.timer.cancel()
+        # Internal state never goes to the game: the escape reply keeps
+        # exactly type/strength/side/spikes (+ id).
+        out = {k: v for k, v in out.items() if k != "hab"}
         if req.rid is not None:
             out = {**out, "id": req.rid}
         req.outbox.put_nowait(out)
@@ -320,8 +363,10 @@ class BrainServer:
         if out.get("type") == "escape" and on_time:
             self.miss_streak = 0
             self.ok_streak += 1
+            self.last_hab = out.get("hab")
             if self.fallback:
-                self.fallback.sync(out["strength"], out["side"])
+                self.fallback.sync(out["strength"], out["side"], out.get("hab"))
+                self._fb_last_t = time.perf_counter()
             if not self.healthy and self.ok_streak >= RECOVER_N:
                 self._set_healthy(True, f"{RECOVER_N} on-time decisions")
         elif out.get("type") == "escape":
@@ -477,13 +522,19 @@ class BrainServer:
             return None
         if t == "reset":
             self.senses.clear()
+            self.last_hab = None
+            self._fb_last_t = None
             if self.fallback:
                 self.fallback.reset()
             if self.worker and self.source() == "live":
                 def done(out):
                     if out is not SUPERSEDED:
                         loop.call_soon_threadsafe(outbox.put_nowait, {**out, **tag})
-                self.worker.submit(key, {"op": "reset"}, done)
+                # Own queue slot: under the connection's key, a looming sent
+                # right after it would supersede it and the reset would be
+                # lost. The worker takes the oldest job first, so it still
+                # runs before that looming.
+                self.worker.submit(object(), {"op": "reset"}, done)
                 return None
             if self.worker:      # unhealthy: reset without waiting on it
                 self.worker.submit(object(), {"op": "reset"}, lambda out: None)
@@ -500,8 +551,26 @@ class BrainServer:
                 # The live brain wasn't stepped while on fallback; pick up where
                 # the fallback left off so strength doesn't jump.
                 self.worker.submit(object(), {"op": "sync", "strength": self.fallback.strength,
-                                              "side": self.fallback.jump}, lambda out: None)
+                                              "side": self.fallback.jump,
+                                              "hab": self.fallback.hab.snapshot()},
+                                   lambda out: None)
+                self.last_hab = self.fallback.hab.snapshot()
             return {"type": "mode_ok", "mode": m, "source": self.source(), **tag}
+        if t == "habituation":
+            on = msg.get("enabled")
+            if not isinstance(on, bool):
+                return {"type": "error", "error": "enabled must be true or false", **tag}
+            if on != self.habituation:
+                log(f"habituation {'on' if on else 'off'}")
+            self.habituation = on
+            self.last_hab = None
+            if self.fallback:
+                self.fallback.set_habituation(on)
+            if self.worker:
+                # Queued like any job, so it applies before later decisions.
+                self.worker.submit(object(), {"op": "habituation", "enabled": on},
+                                   lambda out: None)
+            return {"type": "habituation_ok", "enabled": on, **tag}
         if t == "ping":
             return {"type": "pong", **tag}
         if t == "status":
@@ -540,16 +609,17 @@ def load_brains(args):
     if args.mode != "fallback":
         try:
             from brain import FlyBrain      # needs NumPy
-            live = FlyBrain(args.subnet, seed=args.seed)
+            live = FlyBrain(args.subnet, seed=args.seed, habituation=args.habituation == "on")
             live.decide(0.0, "center")      # warm up NumPy
             live.reset()
             log(f"live brain: {live.path.name}, {live.n} neurons, "
-                f"max rate {live.max_rate_hz} Hz")
+                f"max rate {live.max_rate_hz} Hz, habituation {args.habituation}")
         except Exception as e:
             log(f"live brain unavailable ({e.__class__.__name__}: {e}); using fallback")
     try:
         from fallback import FallbackBrain
-        fallback = FallbackBrain(args.lookup, seed=args.seed)
+        fallback = FallbackBrain(args.lookup, seed=args.seed,
+                                 habituation=args.habituation == "on")
         log(f"fallback: {fallback.path.name} (built from {fallback.table['subnet']})")
     except Exception as e:
         log(f"fallback unavailable ({e.__class__.__name__}: {e})")
@@ -594,6 +664,9 @@ def main():
     ap.add_argument("--spin-ms", type=float, default=100.0,
                     help="busy-wait this long for the next request to keep the CPU "
                          "clock up (0 = off; costs one core while the game is sending)")
+    ap.add_argument("--habituation", choices=("on", "off"), default="on",
+                    help="the fly gets used to repeated threats and recovers in a few "
+                         "seconds (see habituation.py); also switchable at runtime")
     ap.add_argument("--hold-ms", type=float, default=100.0,
                     help="a looming/sound value keeps counting this long after it arrives "
                          "(then 0); resend at 20 Hz to sustain it")

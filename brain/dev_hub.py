@@ -1,7 +1,7 @@
 """Stand-in hub for testing the brain without the real hub (dev only).
 
 Relays JSON between clients: whoever sends {"type":"hello","role":"brain"} is
-the brain; "looming"/"sound"/"reset"/"status"/"ping" from anyone else go to
+the brain; "looming"/"sound"/"reset"/"status"/"ping"/"habituation" from anyone else go to
 the brain (anything else is dropped silently, so run `bench.py validate`
 against the brain itself, not through this hub), and the
 brain's replies go back to whoever asked (by id) or to every other client.
@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ws  # noqa: E402
 
-TO_BRAIN = {"looming", "sound", "reset", "status", "ping"}
+TO_BRAIN = {"looming", "sound", "reset", "status", "ping", "habituation"}
 
 
 class Hub:
