@@ -3,12 +3,14 @@
 #
 #   sh backend/start.sh           start both (Ctrl+C stops both)
 #   sh backend/start.sh stop      stop servers left running by this script
-#   sh backend/start.sh status    show whether they are running
+#   sh backend/start.sh status    show whether they are running (and their QNX priorities)
+#   sh backend/start.sh logs      recent backend events from the QNX system log (slog2info)
 #
 # Options (environment variables):
 #   SUBNET=brain/subnet/subnet_t10.npz   which brain size to use (t5 / t10 / t20)
 #   BRAIN_MODE=auto                      auto, live or fallback
 #   BRAIN_PORT=8765  BACKEND_PORT=8766  UDP_PORT=9000
+#   RT_PRIORITY=20                       QNX real-time priority (0 = leave at the default)
 #
 # Works with plain POSIX sh and Python 3 on QNX or Linux. NumPy is optional: without
 # it the brain answers from its lookup table.
@@ -20,6 +22,7 @@ BRAIN_MODE=${BRAIN_MODE:-auto}
 BRAIN_PORT=${BRAIN_PORT:-8765}
 BACKEND_PORT=${BACKEND_PORT:-8766}
 UDP_PORT=${UDP_PORT:-9000}
+RT_PRIORITY=${RT_PRIORITY:-20}
 mkdir -p "$RUN"
 
 port_open() {  # port_open PORT -> 0 if something accepts connections
@@ -52,11 +55,20 @@ case "$1" in
         for n in brain backend; do
             if alive $n; then echo "$n: running (pid $(cat "$RUN/$n.pid"))"; else echo "$n: not running"; fi
         done
+        if command -v pidin >/dev/null 2>&1; then     # QNX: show priority and scheduling policy (e.g. 20r)
+            for n in brain backend; do
+                alive $n && echo "$n QNX priority: $(pidin | awk -v p="$(cat "$RUN/$n.pid")" '$1==p {print $4; exit}')"
+            done
+        fi
         port_open "$BRAIN_PORT" && echo "port $BRAIN_PORT: open" || echo "port $BRAIN_PORT: closed"
         port_open "$BACKEND_PORT" && echo "port $BACKEND_PORT: open" || echo "port $BACKEND_PORT: closed"
         exit 0 ;;
+    logs)
+        if command -v slog2info >/dev/null 2>&1; then slog2info 2>/dev/null | grep "flyai:" | tail -n 30
+        else echo "slog2info not found (this is not QNX); see backend/.run/backend.log"; fi
+        exit 0 ;;
     ""|start) ;;
-    *) echo "usage: sh backend/start.sh [start|stop|status]"; exit 2 ;;
+    *) echo "usage: sh backend/start.sh [start|stop|status|logs]"; exit 2 ;;
 esac
 
 # ---- checks ---------------------------------------------------------------
@@ -88,7 +100,13 @@ done
 cleanup() { stop_one backend; stop_one brain; exit "${1:-0}"; }
 trap cleanup INT TERM
 
-python3 brain/server.py --mode "$BRAIN_MODE" --port "$BRAIN_PORT" $SUBNET_ARG >"$RUN/brain.log" 2>&1 &
+# On QNX, `on -p 20r` starts the brain under round-robin real-time priority 20 (default is 10).
+RT=""
+if [ "$RT_PRIORITY" -gt 0 ] 2>/dev/null && command -v on >/dev/null 2>&1 && on -p "${RT_PRIORITY}r" true 2>/dev/null; then
+    RT="on -p ${RT_PRIORITY}r"
+    echo "QNX: starting the brain with: $RT"
+fi
+$RT python3 brain/server.py --mode "$BRAIN_MODE" --port "$BRAIN_PORT" $SUBNET_ARG >"$RUN/brain.log" 2>&1 &
 echo $! >"$RUN/brain.pid"
 
 i=0
@@ -102,7 +120,7 @@ until port_open "$BRAIN_PORT"; do
 done
 echo "brain:   ws://0.0.0.0:$BRAIN_PORT  (log: backend/.run/brain.log)"
 
-python3 backend/server.py --port "$BACKEND_PORT" --udp-port "$UDP_PORT" --brain "ws://127.0.0.1:$BRAIN_PORT" >"$RUN/backend.log" 2>&1 &
+python3 backend/server.py --rt-priority "$RT_PRIORITY" --port "$BACKEND_PORT" --udp-port "$UDP_PORT" --brain "ws://127.0.0.1:$BRAIN_PORT" >"$RUN/backend.log" 2>&1 &
 echo $! >"$RUN/backend.pid"
 i=0
 until port_open "$BACKEND_PORT"; do

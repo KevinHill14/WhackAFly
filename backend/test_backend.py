@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "brain")); sys.path.insert(0, str(ROOT / "backend"))
 import ws
+import qnx
 from game import FlyGame
 
 FAIL = []
@@ -69,6 +70,19 @@ def regression_tests():
         g.snapshot()
     check(ok and g.head == [0, 1.6, 0], "bad vectors are rejected and leave the game state intact")
 
+def qnx_tests():
+    print("qnx module")
+    lat = qnx.Latency(size=5)
+    for v in (1, 2, 3, 4, 100, 6): lat.add(v)
+    s = lat.summary()
+    check(s["count"] == 6 and s["max_ever"] == 100 and len(lat.samples) == 5, "latency tracker keeps a window and the worst case")
+    check(qnx.Latency().summary() == {"count": 0}, "empty latency summary is safe")
+    if not qnx.IS_QNX:
+        check(qnx.set_realtime(20) == "not changed" and qnx.lock_memory() == "not changed" and qnx.tick_ns() is None,
+              "QNX features are no-ops off QNX")
+    qnx.log(qnx.SLOG_INFO, "test message", every=60, key="t"); qnx.log(qnx.SLOG_INFO, "suppressed", every=60, key="t")
+    check(True, "logging works without slog2")
+
 async def end_to_end():
     print("end to end (brain + backend + fake Unity)")
     py = sys.executable
@@ -127,11 +141,20 @@ async def end_to_end():
             m = await asyncio.wait_for(q.get(), 1)
             if m["type"] == "swatter": sw = m; break
         check(sw is not None and sw["evt"] == "swing", "ESP32 UDP swing is forwarded to Unity")
+        await sock.send(json.dumps({"type": "stats"}))
+        st = None
+        for _ in range(60):
+            m = await asyncio.wait_for(q.get(), 1)
+            if m["type"] == "stats": st = m; break
+        check(st is not None and st["tick_lateness_ms"].get("count", 0) > 30, "stats reports 30 Hz tick timing")
+        check(st is not None and st["brain_rtt_ms"].get("count", 0) > 0 and st["brain_connected"], f"stats reports brain round trip {st and st['brain_rtt_ms']}")
+        check(st is not None and "scheduling" in st["qnx"], "stats reports the QNX setup")
         pump_task.cancel(); await sock.close()
     finally:
         back.terminate(); brain.terminate()
 
 unit_tests()
 regression_tests()
+qnx_tests()
 asyncio.run(end_to_end())
 print("FAILED: " + ", ".join(FAIL) if FAIL else "all passed"); sys.exit(1 if FAIL else 0)

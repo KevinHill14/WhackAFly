@@ -33,11 +33,14 @@ If the brain is not running, the backend still plays: the fly just escapes by a
 simple rule. Unity finds the backend through `FLYAI_BACKEND` (default
 `ws://127.0.0.1:8766`); set it to `ws://<pi-ip>:8766` before launching Unity.
 
+QNX features used (real-time priority, `slog2` logging, deadline stats) are listed in
+`backend/QNX_FEATURES.md`. Send `{"type":"stats"}` to get tick and brain timing figures.
+
 ## Messages (JSON text frames)
 
 Unity to backend: `room` (`landingSpots`, `head`; sent on every scan load and
 reconnect), `pose` (`head`, `aim`, `reach`, about 20 Hz), `swing` (`origin`,
-`dir`, `strength`, `reach`), `reset`, `ping`. Positions are Unity world metres.
+`dir`, `strength`, `reach`), `reset`, `ping`, `stats`. Positions are Unity world metres.
 
 Backend to Unity: `hello`, `fly` (30 Hz: `state` landed/flying/fleeing/dead/idle,
 `pos`, `heading`, `distance`, `score`, `swings`, `spikes`), `event`
