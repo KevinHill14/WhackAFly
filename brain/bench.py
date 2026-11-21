@@ -1,12 +1,16 @@
 """Test client for the brain server: plays the game's side of the protocol.
 
   python brain/bench.py smoke                 # a few messages, prints replies
+  python brain/bench.py validate              # malformed / out-of-range input never crashes it
   python brain/bench.py sweep                 # looming 0->1 per side: strength curve + side
+  python brain/bench.py sound                 # sound 0->1 per side, sound+looming together, hold
+  python brain/bench.py habituation           # repeated threats wear it down; quiet restores it
+  python brain/bench.py mixed --seconds 20    # 20 Hz looming + sound in the same frames
   python brain/bench.py latency --seconds 20  # 20 Hz looming, round-trip times + ping during load
   python brain/bench.py long --seconds 600    # long run: RTT drift + server memory
   python brain/bench.py reconnect             # abrupt disconnects, then reconnect
-  python brain/bench.py all                   # smoke+sweep+latency+reconnect+90s long
-  python brain/bench.py fallback              # fallback-mode sweep vs live
+  python brain/bench.py all                   # smoke+validate+sweep+sound+habituation+mixed+latency+reconnect+90s long
+  python brain/bench.py fallback              # fallback vs live: looming, sound and mixed
   python brain/bench.py switch                # live/fallback/auto switches mid-game
   python brain/bench.py failover              # stall the live brain (server --debug)
   python brain/bench.py modes                 # fallback + switch + failover
@@ -42,6 +46,7 @@ class Client:
         self.next_id = 0
         self.waiting = {}
         self.unmatched = []
+        self.loose = asyncio.Queue()      # replies without a matching id
         self.reader = asyncio.ensure_future(self._read())
 
     @classmethod
@@ -52,11 +57,13 @@ class Client:
         try:
             while True:
                 msg = json.loads(await self.sock.recv())
-                fut = self.waiting.pop(msg.get("id"), None)
+                rid = msg.get("id")
+                fut = self.waiting.pop(rid, None) if isinstance(rid, int) else None
                 if fut and not fut.done():
                     fut.set_result((time.perf_counter(), msg))
                 else:
                     self.unmatched.append(msg)
+                    self.loose.put_nowait(msg)
         except ws.ConnectionClosed:
             for f in self.waiting.values():
                 if not f.done():
@@ -77,9 +84,42 @@ class Client:
         t1, reply = await asyncio.wait_for(fut, timeout)
         return reply, (t1 - t0) * 1000
 
+    async def raw(self, text, timeout=5.0):
+        """Send raw text (maybe not even JSON); return the next id-less reply."""
+        await self.sock.send(text)
+        return await asyncio.wait_for(self.loose.get(), timeout)
+
+    async def pair(self, look, lside, snd, sside, timeout=5.0):
+        """Looming + sound in the same frame. Returns (reply, ms, n_replies_for_pair)."""
+        t0 = time.perf_counter()
+        f1 = await self.send({"type": "looming", "value": look, "side": lside})
+        f2 = await self.send({"type": "sound", "value": snd, "side": sside})
+        t1, reply = await asyncio.wait_for(f2, timeout)
+        await asyncio.sleep(0)
+        n = 1 + int(f1.done())
+        if not f1.done():
+            self.waiting.pop(self.next_id - 1, None)
+            f1.cancel()
+        return reply, (t1 - t0) * 1000, n
+
     async def close(self):
         self.reader.cancel()
         await self.sock.close()
+
+
+async def hab_off(c):
+    """Turn habituation off for a test that measures the fresh brain's
+    steady-state response; returns whether it was on."""
+    st, _ = await c.ask({"type": "status"})
+    was = bool(st.get("habituation"))
+    if was:
+        await c.ask({"type": "habituation", "enabled": False})
+    return was
+
+
+async def hab_restore(c, was):
+    if was:
+        await c.ask({"type": "habituation", "enabled": True})
 
 
 def pct(xs, p):
@@ -106,12 +146,338 @@ async def smoke(url):
     check(r.get("type") == "error", "bad value -> error, server keeps running")
     r, _ = await c.ask({"type": "looming", "value": 7, "side": "up"})
     check(r.get("type") == "escape", "out-of-range value / unknown side tolerated")
+    for v, s in [(1, "left"), (1, "right")]:
+        r, ms = await c.ask({"type": "sound", "value": v, "side": s})
+        print(f"  sound {v} {s:6s} -> strength {r.get('strength')} side {r.get('side')} ({ms:.0f} ms)")
+    check(r.get("type") == "escape" and set(r) >= {"strength", "side", "spikes"}
+          and len(r["spikes"]) == len(st.get("group_names", r["spikes"])),
+          "sound reply has the same escape shape")
+    names = st.get("group_names", [])
+    check(names[:19] == OLD_GROUPS[:19] if len(names) >= 19 else False,
+          "first 19 spike groups unchanged (Unity reads them by index)")
+    check(names[19:] == ["JO_L", "JO_R", "sound_inter"], f"new groups at the end: {names[19:]}")
     await c.close()
+
+
+# The 19 groups Unity already reads by index (subnet_t5). New ones are appended.
+OLD_GROUPS = ["LPLC2_L", "LPLC2_R", "LC4_L", "LC4_R", "LPLC1", "LHAD1g1", "PVLP010",
+              "PVLP151", "other_inter", "DNp01_L", "DNp01_R", "DNp02_L", "DNp02_R",
+              "DNp04_L", "DNp04_R", "DNp06_L", "DNp06_R", "DNp11_L", "DNp11_R"]
+
+
+async def validate(url):
+    """Malformed input must give an error reply (or be clamped), never a crash
+    or a dropped connection."""
+    print("validate (malformed / out-of-range input):")
+    c = await Client.open(url)
+    errors = [
+        ("not json", "not json"),
+        ("[1,2]", "JSON array"),
+        ('"hello"', "JSON string"),
+        ("{" * 3000 + "}" * 3000, "deeply nested JSON"),
+        ('{"value":1}', "missing type"),
+        ('{"type":[1,2]}', "non-string type"),
+        ('{"type":"bogus"}', "unknown type"),
+        ('{"type":"looming","value":"x"}', "looming value 'x'"),
+        ('{"type":"sound","value":"x"}', "sound value 'x'"),
+        ('{"type":"sound","value":true}', "boolean value"),
+        ('{"type":"sound","value":null}', "null value"),
+        ('{"type":"sound","value":[1]}', "list value"),
+        ('{"type":"sound","value":{"a":1}}', "object value"),
+        ('{"type":"sound","value":NaN}', "NaN"),
+        ('{"type":"looming","value":Infinity}', "Infinity"),
+        ('{"type":"sound","value":1e999}', "1e999 (overflows to inf)"),
+        ('{"type":"mode","mode":[1]}', "bad mode"),
+        ('{"type":"debug_stall","ms":"x"}', "bad debug_stall"),
+    ]
+    for raw, what in errors:
+        try:
+            r = await c.raw(raw)
+            check(r.get("type") == "error", f"{what} -> error reply ({r.get('error')})")
+        except asyncio.TimeoutError:
+            check(False, f"{what} -> no reply")
+    # Errors echo the id when there is one.
+    r, _ = await c.ask({"type": "sound", "value": "loud"})
+    check(r.get("type") == "error" and "id" in r, "error replies echo the request id")
+    clamped = [
+        ({"type": "sound", "value": 7, "side": "up"}, "sound 7, side 'up' -> clamped to 1, center"),
+        ({"type": "sound", "value": -3, "side": 5}, "sound -3, side 5 -> clamped to 0, center"),
+        ({"type": "sound", "value": "0.5"}, "numeric string '0.5' accepted (as before)"),
+        ({"type": "sound"}, "missing value -> 0"),
+        ({"type": "looming", "value": 1e308, "side": None}, "huge finite value -> clamped"),
+    ]
+    for msg, what in clamped:
+        r, _ = await c.ask(msg)
+        check(r.get("type") == "escape" and 0 <= r["strength"] <= 1
+              and r["side"] in ("left", "right"), what)
+    r, _ = await c.ask({"type": "ping"})
+    check(r.get("type") == "pong", "same connection still works after all of that")
+    st, _ = await c.ask({"type": "status"})
+    print(f"  server counted {st.get('bad_requests')} bad requests")
+    await c.close()
+    c = await Client.open(url)
+    r, _ = await c.ask({"type": "looming", "value": 0.5, "side": "left"})
+    check(r.get("type") == "escape", "new connection works too")
+    await c.close()
+
+
+async def sound_test(url, reps=20, warm=4):
+    """Sound-only sweep, looming-only vs sound vs both, and the hold window."""
+    print("sound (mean strength over", reps, "decisions per level; jump side %):")
+    c = await Client.open(url)
+    was = await hab_off(c)      # measure the fresh brain
+    st, _ = await c.ask({"type": "status"})
+    print(f"  sound in live brain: {st.get('sound_live')}, fallback: {st.get('sound_fallback')}, "
+          f"source: {st.get('source')}")
+    levels = [round(i / 5, 1) for i in range(6)]
+    curves = {}
+    for side in ("left", "right", "center"):
+        means, jumps = [], []
+        for v in levels:
+            await c.ask({"type": "reset"})
+            for _ in range(warm):
+                await c.ask({"type": "sound", "value": v, "side": side})
+            rs = [(await c.ask({"type": "sound", "value": v, "side": side}))[0]
+                  for _ in range(reps)]
+            means.append(statistics.mean(r["strength"] for r in rs))
+            jumps.append(sum(r["side"] == "right" for r in rs) / reps)
+        curves[side] = (means, jumps)
+        print(f"  sound {side:6s} strength: " + " ".join(f"{m:.2f}" for m in means))
+        print(f"  sound {side:6s} jump R %: " + " ".join(f"{j * 100:3.0f}" for j in jumps))
+    for side in ("left", "right"):
+        m = curves[side][0]
+        dips = sum(1 for a, b in zip(m, m[1:]) if b < a - 0.05)
+        check(m[0] < 0.05 and m[-1] > 0.7 and dips == 0,
+              f"sound {side}: strength rises 0 -> {m[-1]:.2f} without dips (looming-like range)")
+    a, b = curves["left"][0][-1], curves["right"][0][-1]
+    check(abs(a - b) <= 0.15, f"ears balanced at full sound: L {a:.2f} / R {b:.2f}")
+    for side, want in (("left", "right"), ("right", "left")):
+        m, j = curves[side]
+        strong = [jj for mm, jj in zip(m, j) if mm >= 0.3]
+        acc = statistics.mean((jj if want == "right" else 1 - jj) for jj in strong)
+        check(acc >= 0.9, f"{side} sound -> jumps {want} {acc * 100:.0f}% (strength >= 0.3)")
+
+    # Looming only, sound only, both in the same frame.
+    async def steady(fn, n=reps):
+        await c.ask({"type": "reset"})
+        for _ in range(warm):
+            await fn()
+        return statistics.mean([(await fn())["strength"] for _ in range(n)])
+
+    async def look():
+        return (await c.ask({"type": "looming", "value": 0.4, "side": "left"}))[0]
+
+    async def snd():
+        return (await c.ask({"type": "sound", "value": 0.4, "side": "left"}))[0]
+    n_pairs = []
+
+    async def both():
+        r, _, n = await c.pair(0.4, "left", 0.4, "left")
+        n_pairs.append(n)
+        return r
+    s_l, s_s, s_b = await steady(look), await steady(snd), await steady(both)
+    print(f"  left 0.4: looming only {s_l:.2f}, sound only {s_s:.2f}, both together {s_b:.2f}")
+    check(s_b >= max(s_l, s_s) + 0.05, "looming + sound together escape harder than either alone")
+    check(all(n == 1 for n in n_pairs),
+          f"same-frame looming+sound -> one reply ({sum(n == 1 for n in n_pairs)}/{len(n_pairs)})")
+
+    # Hold: a one-shot sound stops counting ~hold_ms later.
+    await c.ask({"type": "reset"})
+    for _ in range(6):
+        await c.ask({"type": "sound", "value": 1, "side": "left"})
+    peak = (await c.ask({"type": "sound", "value": 1, "side": "left"}))[0]["strength"]
+    trail = []
+    for _ in range(20):                     # looming 0 at 20 Hz for 1 s
+        trail.append((await c.ask({"type": "looming", "value": 0, "side": "center"}))[0]["strength"])
+        await asyncio.sleep(0.05)
+    print(f"  one-shot loud sound: strength {peak:.2f}, then with no sound "
+          f"{' '.join(f'{x:.2f}' for x in trail[::4])}")
+    check(peak > 0.7 and trail[-1] < 0.05, "a sound stops counting after the hold window")
+    await hab_restore(c, was)
+    await c.close()
+    return curves
+
+
+EVENTS = {   # (frames of stimulus, message builder) - like the game's pulses
+    "glass": (7, lambda: ("pair", (0, "center", 1.0, "left"))),          # 0.35 s
+    "swing": (6, lambda: ("looming", (0.8, "left"))),                    # 0.3 s fake swing
+    "strike": (6, lambda: ("looming", (1.0, "left"))),                   # 0.3 s real strike
+}
+ESCAPE_KEYS = {"type", "strength", "side", "spikes", "id"}
+
+
+async def event(c, kind, frames=30, hz=20, keys=None):
+    """One threat in real time at 20 Hz (stimulus, then looming 0 for the rest
+    of `frames`). Returns the peak strength during it and just after."""
+    n_on, build = EVENTS[kind]
+    peak, nxt = 0.0, time.perf_counter()
+    for i in range(frames):
+        if i < n_on:
+            how, args = build()
+            if how == "pair":
+                r, _, _ = await c.pair(*args)
+            else:
+                r, _ = await c.ask({"type": "looming", "value": args[0], "side": args[1]})
+        else:
+            r, _ = await c.ask({"type": "looming", "value": 0, "side": "center"})
+        if keys is not None:
+            keys.add(frozenset(r))
+        if i < n_on + 3:
+            peak = max(peak, r.get("strength", 0.0))
+        nxt += 1 / hz
+        await asyncio.sleep(max(0, nxt - time.perf_counter()))
+    return peak
+
+
+async def habituation_core(c, label):
+    """Repeated breaking glass wears the left ear down; no messages for 6 s
+    restores it. Returns (peaks, recovered)."""
+    await c.ask({"type": "reset"})
+    peaks = [await event(c, "glass") for _ in range(6)]
+    await asyncio.sleep(6.0)                    # nothing sent: real-time recovery
+    recovered = await event(c, "glass")
+    print(f"  [{label}] 6x breaking glass: {' '.join(f'{p:.2f}' for p in peaks)}"
+          f" -> after 6 s of silence {recovered:.2f}")
+    return peaks, recovered
+
+
+async def habituation_test(url):
+    print("habituation (real time at 20 Hz; events 1.5 s apart):")
+    c = await Client.open(url)
+    st, _ = await c.ask({"type": "status"})
+    check(st.get("habituation") is True, f"habituation on by default (status: {st.get('habituation')})")
+    keys = set()
+    await c.ask({"type": "mode", "mode": "live"})
+    # Fresh responses, each from a reset fly.
+    fresh = {}
+    for kind in ("swing", "strike", "glass"):
+        await c.ask({"type": "reset"})
+        fresh[kind] = await event(c, kind, keys=keys)
+    print(f"  fresh fly: swing {fresh['swing']:.2f}, strike {fresh['strike']:.2f}, "
+          f"glass {fresh['glass']:.2f}")
+    check(min(fresh.values()) >= 0.6, "a fresh fly reacts strongly to its first threat")
+
+    peaks, recovered = await habituation_core(c, "live")
+    first, last = peaks[0], peaks[-1]
+    check(last <= 0.65 * first, f"repeated noise wears it down: {first:.2f} -> {last:.2f}")
+    check(sum(peaks[-2:]) < sum(peaks[:2]), "responses fall over the series")
+    check(recovered >= 0.8 * first, f"recovers after a few seconds of quiet "
+          f"({recovered:.2f} >= 80% of {first:.2f})")
+
+    # Specific to the channel: a habituated left ear doesn't dull the eyes.
+    await c.ask({"type": "reset"})
+    for _ in range(6):
+        await event(c, "glass")
+    st, _ = await c.ask({"type": "status"})
+    eff = st.get("efficacy", {})
+    print(f"  efficacy after 6 glass breaks: {eff}")
+    check(eff.get("ear_left", 1) < 0.8 and eff.get("eye_left", 0) > 0.99,
+          "status shows the left ear fatigued and the eyes fresh")
+    # The fatigue carries over when the answering brain switches.
+    if st.get("fallback_available") and st.get("live_available"):
+        await c.ask({"type": "mode", "mode": "fallback"})
+        st_fb, _ = await c.ask({"type": "status"})
+        await c.ask({"type": "mode", "mode": "live"})
+        await event(c, "glass", frames=4)            # live picks up from the fallback
+        st_lv, _ = await c.ask({"type": "status"})
+        a, b, d = (eff.get("ear_left", 1), st_fb["efficacy"].get("ear_left", 1),
+                   st_lv["efficacy"].get("ear_left", 1))
+        print(f"  ear_left efficacy: live {a:.3f} -> fallback {b:.3f} -> live again {d:.3f}")
+        check(abs(a - b) < 0.05 and d < 0.8, "fatigue carries over live -> fallback -> live")
+    eye = await event(c, "swing")
+    check(eye >= 0.75 * fresh["swing"], f"eyes still fresh after ear habituation "
+          f"({eye:.2f} vs fresh {fresh['swing']:.2f})")
+
+    # The tactic: wear it down with fake swings, then strike.
+    await c.ask({"type": "reset"})
+    fakes = [await event(c, "swing") for _ in range(5)]
+    strike = await event(c, "strike")
+    print(f"  5 fake swings: {' '.join(f'{p:.2f}' for p in fakes)} -> real strike {strike:.2f}"
+          f" (fresh strike {fresh['strike']:.2f})")
+    check(fakes[-1] <= 0.65 * fakes[0], "repeated fake swings wear it down")
+    check(strike <= 0.75 * fresh["strike"], "a strike after fake swings gets a weaker escape")
+
+    # Reset = fresh fly, even when a looming follows in the same frame.
+    f_reset = await c.send({"type": "reset"})
+    r, _ = await c.ask({"type": "looming", "value": 0, "side": "center"})
+    try:
+        _, rr = await asyncio.wait_for(f_reset, 2)
+    except asyncio.TimeoutError:
+        rr = {}
+    st, _ = await c.ask({"type": "status"})
+    check(rr.get("type") == "reset_ok" and min(st["efficacy"].values()) == 1.0,
+          "reset + looming in one frame: reset_ok and a fresh fly")
+    again = await event(c, "glass")
+    check(again >= 0.85 * fresh["glass"], f"reset restores a fresh fly ({again:.2f})")
+    r, _ = await c.ask({"type": "habituation", "enabled": False})
+    check(r.get("type") == "habituation_ok" and r.get("enabled") is False, "habituation can be turned off")
+    await c.ask({"type": "reset"})
+    off = [await event(c, "glass") for _ in range(5)]
+    print(f"  habituation off, 5x glass: {' '.join(f'{p:.2f}' for p in off)}")
+    check(off[-1] >= 0.8 * off[0], "with habituation off, repeats don't wear it down")
+    r, _ = await c.ask({"type": "habituation", "enabled": "yes"})
+    check(r.get("type") == "error", "habituation needs a true/false 'enabled'")
+    await c.ask({"type": "habituation", "enabled": True})
+    check(keys == {frozenset(ESCAPE_KEYS)}, f"escape replies keep exactly {sorted(ESCAPE_KEYS)}")
+
+    # Same model in the fallback: same wear-down and recovery.
+    await c.ask({"type": "mode", "mode": "fallback"})
+    fb_peaks, fb_rec = await habituation_core(c, "fallback")
+    await c.ask({"type": "mode", "mode": "auto"})
+    await c.close()
+    live_ratio, fb_ratio = last / first, fb_peaks[-1] / fb_peaks[0]
+    check(abs(live_ratio - fb_ratio) <= 0.2,
+          f"fallback wears down like live (last/first {fb_ratio:.2f} vs {live_ratio:.2f})")
+    check(fb_rec >= 0.8 * fb_peaks[0], f"fallback recovers too ({fb_rec:.2f})")
+
+
+async def mixed(url, seconds=20, hz=20):
+    """20 Hz looming every frame + sound in the same frames (sustained and
+    one-shot bursts, both ears): one reply per frame, latency in budget."""
+    print(f"mixed ({hz} Hz looming + sound in the same frames, {seconds}s):")
+    c = await Client.open(url)
+    await c.ask({"type": "reset"})
+    rtts, replies, frames, errors, multi = [], [], 0, 0, 0
+    t_end = time.perf_counter() + seconds
+    nxt = time.perf_counter()
+    k = 0
+    while time.perf_counter() < t_end:
+        lv = (k % 40) / 39
+        ls = ("left", "right", "center")[(k // 40) % 3]
+        phase = k % 30
+        sv = 1.0 if phase < 3 else (0.4 if 10 <= phase < 20 else 0.0)   # bursts + sustained
+        ss = ("left", "right", "center")[(k // 30) % 3]
+        if sv > 0:
+            r, ms, n = await c.pair(lv, ls, sv, ss)
+            multi += n > 1
+        else:
+            r, ms = await c.ask({"type": "looming", "value": lv, "side": ls})
+        frames += 1
+        rtts.append(ms)
+        if r.get("type") != "escape":
+            errors += 1
+        else:
+            replies.append(r)
+        k += 1
+        nxt += 1 / hz
+        await asyncio.sleep(max(0, nxt - time.perf_counter()))
+    st, _ = await c.ask({"type": "status"})
+    await c.close()
+    print(f"  frames {frames}, escape replies {len(replies)}, errors {errors}, "
+          f"frames with 2 replies {multi}, merged by server {st.get('merged')}")
+    print(f"  RTT ms: p50 {pct(rtts, 50):.1f}  p95 {pct(rtts, 95):.1f}  max {max(rtts):.1f}; "
+          f"server avg step {st.get('avg_step_ms')} ms")
+    check(errors == 0 and len(replies) == frames, "every frame answered with an escape")
+    check(multi == 0, "looming+sound in one frame never gave two answers")
+    check(pct(rtts, 95) < 100, f"p95 RTT < 100 ms ({pct(rtts, 95):.0f})")
+    if "avg_step_ms" in st:
+        check(st["avg_step_ms"] < 50, f"decision well under 50 ms ({st['avg_step_ms']} ms)")
 
 
 async def sweep(url, reps=20, warm=4):
     print("sweep (mean strength over", reps, "decisions per level; jump side %):")
     c = await Client.open(url)
+    was = await hab_off(c)      # measure the fresh brain
     levels = [round(i / 10, 1) for i in range(11)]
     curves = {}
     for side in ("left", "right", "center"):
@@ -127,6 +493,7 @@ async def sweep(url, reps=20, warm=4):
         curves[side] = (means, jumps)
         print(f"  {side:6s} strength: " + " ".join(f"{m:.2f}" for m in means))
         print(f"  {side:6s} jump R %: " + " ".join(f"{j * 100:3.0f}" for j in jumps))
+    await hab_restore(c, was)
     await c.close()
 
     for side in ("left", "right", "center"):
@@ -224,33 +591,90 @@ async def reconnect(url, rounds=10):
     print(f"reconnect ({rounds} abrupt disconnects mid-request):")
     for i in range(rounds):
         c = await Client.open(url)
-        for _ in range(5):                      # fire and vanish without waiting
-            await c.send({"type": "looming", "value": 1, "side": "left"})
+        for j in range(5):                      # fire and vanish without waiting
+            kind = ("looming", "sound")[(i + j) % 2]
+            await c.send({"type": kind, "value": 1, "side": "left"})
         c.reader.cancel()
         c.sock.writer.transport.abort()          # no close handshake: like a crash
     await asyncio.sleep(0.5)
     c = await Client.open(url)
     r, ms = await c.ask({"type": "looming", "value": 1, "side": "right"})
+    r2, ms2, _ = await c.pair(0.5, "left", 0.5, "right")
     st, _ = await c.ask({"type": "status"})
     await c.close()
     check(r.get("type") == "escape", f"server answers after {rounds} crashes ({ms:.0f} ms)")
+    check(r2.get("type") == "escape", f"looming+sound works after the crashes ({ms2:.0f} ms)")
     check(st["clients"] == 1, f"dead clients cleaned up (clients={st['clients']})")
 
 
-async def fallback_vs_live(url):
-    print("fallback vs live (same sweep in each mode):")
+MIX_POINTS = [(lv, ls, sv, ss) for lv, sv in ((0.3, 0.3), (0.3, 0.7), (0.7, 0.3), (0.5, 0.5))
+              for ls, ss in (("left", "left"), ("left", "right"), ("right", "right"),
+                             ("center", "center"))]
+
+
+async def mix_points(url, reps=20, warm=4):
+    """Steady strength for looming + sound sent in the same frames."""
     c = await Client.open(url)
-    await c.ask({"type": "mode", "mode": "live"})
-    live = await sweep(url)
-    await c.ask({"type": "mode", "mode": "fallback"})
-    st, _ = await c.ask({"type": "status"})
-    check(st["source"] == "fallback", "mode fallback -> answering from fallback")
-    fb = await sweep(url)
+    was = await hab_off(c)      # measure the fresh brain
+    out = []
+    for lv, ls, sv, ss in MIX_POINTS:
+        await c.ask({"type": "reset"})
+        for _ in range(warm):
+            await c.pair(lv, ls, sv, ss)
+        out.append(statistics.mean([(await c.pair(lv, ls, sv, ss))[0]["strength"]
+                                    for _ in range(reps)]))
+    await hab_restore(c, was)
+    await c.close()
+    return out
+
+
+async def fallback_vs_live(url, tol=0.15):
+    print(f"fallback vs live (same inputs in each mode; tolerance {tol} in strength):")
+    c = await Client.open(url)
+    res = {}
+    for mode in ("live", "fallback"):
+        await c.ask({"type": "mode", "mode": mode})
+        st, _ = await c.ask({"type": "status"})
+        check(st["source"] == mode, f"mode {mode} -> answering from {st['source']}")
+        print(f"  --- {mode}:")
+        res[mode] = (await sweep(url), await sound_sweep(url), await mix_points(url))
     await c.ask({"type": "mode", "mode": "auto"})
     await c.close()
+    (lv_live, sd_live, mx_live), (lv_fb, sd_fb, mx_fb) = res["live"], res["fallback"]
     for side in ("left", "right", "center"):
-        err = max(abs(a - b) for a, b in zip(live[side][0], fb[side][0]))
-        check(err < 0.15, f"{side}: fallback strength within 0.15 of live (max diff {err:.2f})")
+        err = max(abs(a - b) for a, b in zip(lv_live[side][0], lv_fb[side][0]))
+        check(err < tol, f"looming {side}: fallback within {tol} of live (max diff {err:.2f})")
+        err = max(abs(a - b) for a, b in zip(sd_live[side][0], sd_fb[side][0]))
+        check(err < tol, f"sound {side}: fallback within {tol} of live (max diff {err:.2f})")
+    diffs = [abs(a - b) for a, b in zip(mx_live, mx_fb)]
+    worst = max(range(len(diffs)), key=diffs.__getitem__)
+    print("  mixed live    : " + " ".join(f"{x:.2f}" for x in mx_live))
+    print("  mixed fallback: " + " ".join(f"{x:.2f}" for x in mx_fb))
+    check(max(diffs) < tol, f"looming+sound: fallback within {tol} of live at {len(diffs)} "
+          f"points (max diff {max(diffs):.2f} at {MIX_POINTS[worst]})")
+
+
+async def sound_sweep(url, reps=20, warm=4):
+    """Sound-only strength curve per side (levels 0..1 in 0.1), like sweep()."""
+    c = await Client.open(url)
+    was = await hab_off(c)      # measure the fresh brain
+    levels = [round(i / 10, 1) for i in range(11)]
+    curves = {}
+    for side in ("left", "right", "center"):
+        means, jumps = [], []
+        for v in levels:
+            await c.ask({"type": "reset"})
+            for _ in range(warm):
+                await c.ask({"type": "sound", "value": v, "side": side})
+            rs = [(await c.ask({"type": "sound", "value": v, "side": side}))[0]
+                  for _ in range(reps)]
+            means.append(statistics.mean(r["strength"] for r in rs))
+            jumps.append(sum(r["side"] == "right" for r in rs) / reps)
+        curves[side] = (means, jumps)
+        print(f"  sound {side:6s} strength: " + " ".join(f"{m:.2f}" for m in means))
+    await hab_restore(c, was)
+    await c.close()
+    return curves
 
 
 async def stream(c, seconds, hz, plan, value_fn):
@@ -267,8 +691,12 @@ async def stream(c, seconds, hz, plan, value_fn):
             if at not in done and el >= at:
                 done.add(at)
                 await fn()
-        v, side = value_fn(k)
-        fut = await c.send({"type": "looming", "value": v, "side": side})
+        x = value_fn(k)
+        fut = await c.send({"type": "looming", "value": x[0], "side": x[1]})
+        if len(x) == 4:     # plus a sound in the same frame: one reply, to the sound
+            c.waiting.pop(c.next_id, None)
+            fut.cancel()
+            fut = await c.send({"type": "sound", "value": x[2], "side": x[3]})
         log.append((time.perf_counter(), fut))
         k += 1
         nxt += 1 / hz
@@ -291,7 +719,7 @@ def max_reply_gap(rows):
 
 
 async def switch_test(url, hz=20):
-    print("mode switching mid-game (20 Hz, steady left looming 0.8):")
+    print("mode switching mid-game (20 Hz, steady left looming 0.5 + left sound 0.3 each frame):")
     c = await Client.open(url)
     await c.ask({"type": "mode", "mode": "live"})
     await c.ask({"type": "reset"})
@@ -304,7 +732,7 @@ async def switch_test(url, hz=20):
         return f
     switch_at = (2, 4, 6)
     rows = await stream(c, 8, hz, dict(zip(switch_at, (to("fallback"), to("auto"), to("live")))),
-                        lambda k: (0.8, "left"))
+                        lambda k: (0.5, "left", 0.3, "left"))
     await c.close()
     answered = [r for _, t1, r in rows if t1 is not None]
     st = [(t0, r["strength"]) for t0, t1, r in rows
@@ -321,7 +749,7 @@ async def switch_test(url, hz=20):
     check(max_reply_gap(rows) < 150, "no reply gap > 150 ms across switches")
     check(at_switch <= max(0.25, noise),
           f"strength continuous across switches ({at_switch:.2f} <= normal noise)")
-    check(sides == {"right"}, f"left looming -> jumps right in every mode ({sides})")
+    check(sides == {"right"}, f"left looming + sound -> jumps right in every mode ({sides})")
     check([s for _, s in sources] == ["fallback", "live", "live"], "each switch took effect")
 
 
@@ -338,7 +766,8 @@ async def failover_test(url, hz=20, stall_ms=1500):
         r, _ = await c.ask({"type": "status"})
         seen.append(r["source"])
     rows = await stream(c, 7, hz, {1.5: stall, 2.5: peek, 6.5: peek},
-                        lambda k: (0.7, ("left", "right")[(k // 30) % 2]))
+                        lambda k: (0.6, ("left", "right")[(k // 30) % 2],
+                                   0.3 * (k % 4 < 2), ("left", "right")[(k // 30) % 2]))
     st, _ = await c.ask({"type": "status"})
     await c.close()
     answered = sum(1 for _, t1, _ in rows if t1 is not None)
@@ -361,16 +790,19 @@ def speed():
         b = FlyBrain(p, seed=0)
         b.decide(0.5, "left")
         res = {}
-        for label, gap in (("back-to-back", 0.0), ("20 Hz paced", 0.05)):
+        sides = ("left", "right", "center")
+        for label, gap, snd in (("back-to-back", 0.0, 0.0), ("20 Hz paced", 0.05, 0.0),
+                                ("+sound 20 Hz", 0.05, 1.0)):
             ts = []
             for k in range(30):
                 if gap:
                     time.sleep(gap)
                 t0 = time.perf_counter()
-                b.decide(0.8, ("left", "right", "center")[k % 3])
+                # Full sound on all sides incl. the left ear (highest input rate).
+                b.decide(0.8, sides[k % 3], snd, sides[(k + 1) % 3])
                 ts.append((time.perf_counter() - t0) * 1000)
             res[label] = statistics.median(ts), pct(ts, 95)
-        ok = 1000 / res["20 Hz paced"][1] >= 10
+        ok = 1000 / max(res["20 Hz paced"][1], res["+sound 20 Hz"][1]) >= 10
         print(f"  {p.name:16s} {b.n:5d} neurons  " + "  ".join(
             f"{k}: median {m:.1f} ms / p95 {q:.1f} ms" for k, (m, q) in res.items())
             + f"  -> {1000 / res['back-to-back'][0]:.0f}/s {'OK' if ok else 'TOO SLOW'}")
@@ -385,8 +817,16 @@ async def amain(a):
         speed()
     if a.test in ("smoke", "all"):
         await smoke(a.url)
+    if a.test in ("validate", "all"):
+        await validate(a.url)
     if a.test in ("sweep", "all"):
         await sweep(a.url)
+    if a.test in ("sound", "all"):
+        await sound_test(a.url)
+    if a.test in ("habituation", "all"):
+        await habituation_test(a.url)
+    if a.test in ("mixed", "all"):
+        await mixed(a.url, a.seconds or 20)
     if a.test in ("latency", "all"):
         await latency(a.url, a.seconds or 20)
     if a.test in ("reconnect", "all"):
@@ -405,8 +845,9 @@ async def amain(a):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("test", choices=["smoke", "sweep", "latency", "long", "reconnect", "all",
-                                     "fallback", "switch", "failover", "modes", "speed"])
+    ap.add_argument("test", choices=["smoke", "validate", "sweep", "sound", "habituation", "mixed", "latency",
+                                     "long", "reconnect", "all", "fallback", "switch",
+                                     "failover", "modes", "speed"])
     ap.add_argument("--url", default="ws://127.0.0.1:8765")
     ap.add_argument("--seconds", type=int, default=None)
     sys.exit(asyncio.run(amain(ap.parse_args())))
