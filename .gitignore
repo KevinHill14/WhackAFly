@@ -72,3 +72,6 @@ local.properties
 
 # Local firmware config (WiFi credentials)
 firmware/include/config.h
+
+# Fly brain: raw connectome data (~135 MB, fetch with brain/get_data.sh)
+brain/data/
