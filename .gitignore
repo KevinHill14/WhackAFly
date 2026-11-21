@@ -1,0 +1,74 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# Logs
+*.log
+logs/
+
+# Build output
+build/
+dist/
+out/
+bin/
+obj/
+target/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.npm/
+.next/
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Java / Android
+*.class
+*.jar
+.gradle/
+local.properties
+
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Bb]uilds/
+*.csproj
+*.sln
+
+# Godot
+.godot/
+.import/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# PlatformIO
+.pio/
+
+# Local firmware config (WiFi credentials)
+firmware/include/config.h
