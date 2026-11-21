@@ -1,7 +1,17 @@
 """Fly brain server: JSON over WebSocket.
 
-  in : {"type":"looming","value":0-1,"side":"left"|"right"|"center"}
+  in : {"type":"looming","value":0-1,"side":"left"|"right"|"center"}   (eyes)
+       {"type":"sound",  "value":0-1,"side":"left"|"right"|"center"}   (ears)
   out: {"type":"escape","strength":0-1,"side":"left"|"right","spikes":[counts]}
+
+Senses are combined: each decision simulates the latest looming AND the
+latest sound together (a value counts for --hold-ms after it arrives, then
+it's treated as 0). Messages that arrive within --gather-ms of each other
+(e.g. a looming and a sound sent in the same game frame) become ONE 50 ms
+simulation and ONE reply, carrying the id of the last of them.
+Bad input never crashes the server: non-numeric / non-finite values and
+unknown message types get {"type":"error",...}; values are clamped to 0..1
+and an unknown side counts as "center".
 
 Extras (all optional):
   {"type":"ping"}   -> {"type":"pong"}                 (health / latency)
@@ -160,7 +170,8 @@ class BrainWorker(threading.Thread):
                     time.sleep(job["ms"] / 1000.0)
                     out = {"type": "stall_ok"}
                 else:
-                    r = self.brain.decide(job["value"], job["side"])
+                    r = self.brain.decide(job["looming"], job["side"],
+                                          job["sound"], job["sound_side"])
                     out = {"type": "escape", "strength": r["strength"],
                            "side": r["side"], "spikes": r["spikes"]}
                     self.decisions += 1
@@ -183,19 +194,38 @@ class BrainWorker(threading.Thread):
 
 
 class Request:
-    __slots__ = ("t0", "answered", "timer", "value", "side", "rid", "outbox", "probe")
+    __slots__ = ("t0", "answered", "timer", "job", "rid", "outbox", "probe")
 
-    def __init__(self, value, side, rid, outbox, probe):
+    def __init__(self, rid, outbox, job=None, probe=False):
         self.t0 = time.perf_counter()
         self.answered = False
         self.timer = None
-        self.value, self.side, self.rid = value, side, rid
+        self.job, self.rid = job, rid
         self.outbox, self.probe = outbox, probe
+
+
+def parse_sense(msg):
+    """Validate a looming/sound message. Returns (value, side) or an error
+    string. Missing value = 0 and missing/unknown side = "center" (as the
+    looming message always allowed); out-of-range values are clamped."""
+    v = msg.get("value", 0.0)
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        return "value must be a number"
+    try:
+        v = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return "value must be a number"
+    if math.isnan(v) or math.isinf(v):
+        return "value must be finite"
+    side = msg.get("side", "center")
+    if not isinstance(side, str) or side not in SIDES:
+        side = "center"
+    return min(1.0, max(0.0, v)), side
 
 
 class BrainServer:
     def __init__(self, live=None, fallback=None, mode="auto", spin_ms=0.0,
-                 timeout_ms=200.0, debug=False):
+                 timeout_ms=200.0, debug=False, hold_ms=100.0, gather_ms=3.0):
         if live is None and fallback is None:
             raise SystemExit("no brain available: neither live nor fallback loaded")
         self.live = live
@@ -213,6 +243,13 @@ class BrainServer:
         self.started = time.monotonic()
         self.clients = 0
         self.inflight = {}          # conn key -> newest unanswered live Request
+        # Latest value of each sense: sense -> (value, side, arrival time).
+        self.hold_s = hold_ms / 1000.0
+        self.gather_s = gather_ms / 1000.0
+        self.senses = {}
+        self.gathering = {}         # conn key -> Request waiting for its window
+        self.merged = 0             # messages folded into a later one's decision
+        self.bad_requests = 0
         names = (live or fallback).group_names
         if live and fallback and list(fallback.group_names) != list(live.group_names):
             log("WARNING: lookup table groups differ from the live subnetwork; "
@@ -245,10 +282,16 @@ class BrainServer:
               "live_misses": self.live_misses, "fallback_replies": self.fallback_replies,
               "group_names": self.group_names, "decision_ms": 50.0,
               "clients": self.clients, "rss_mb": round(rss_mb() or -1, 1),
+              "senses": ["looming", "sound"],
+              "sound_live": bool(self.live is not None and self.live.has_sound),
+              "sound_fallback": bool(self.fallback is not None and self.fallback.has_sound),
+              "hold_ms": self.hold_s * 1000, "gather_ms": self.gather_s * 1000,
+              "merged": self.merged, "bad_requests": self.bad_requests,
               "uptime_s": round(time.monotonic() - self.started, 1)}
         if self.live:
             st.update(subnet=self.live.path.name, neurons=self.live.n,
                       threshold=self.live.threshold, max_rate_hz=self.live.max_rate_hz,
+                      sound_rate_hz=self.live.sound_rate_hz,
                       decisions=w.decisions, coalesced=w.coalesced,
                       last_step_ms=round(w.last_ms, 2),
                       avg_step_ms=round(w.avg_step_ms(), 2))
@@ -256,7 +299,8 @@ class BrainServer:
 
     # --- answering -----------------------------------------------------------
     def _fallback_reply(self, req):
-        out = self.fallback.decide(req.value, req.side)
+        j = req.job
+        out = self.fallback.decide(j["looming"], j["side"], j["sound"], j["sound_side"])
         self.fallback_replies += 1
         return out
 
@@ -306,10 +350,49 @@ class BrainServer:
             self._send(req, self._fallback_reply(req))
         # Without a fallback (mode live, or no table) the reply just comes late.
 
-    def looming(self, key, value, side, rid, outbox, loop):
+    def sense(self, key, kind, value, side, rid, outbox, loop):
+        """A looming or sound message: update that sense, then decide once the
+        gather window closes (merging anything else that arrives meanwhile)."""
+        self.senses[kind] = (value, side, time.perf_counter())
+        req = Request(rid, outbox)
+        prev = self.gathering.get(key)
+        self.gathering[key] = req
+        if prev is not None:
+            # Same window: the earlier message is folded into this decision
+            # (no separate reply) and its arrival time still sets the deadline.
+            prev.answered = True
+            req.t0 = prev.t0
+            self.merged += 1
+        elif self.gather_s > 0:
+            # Two stages: when the timer fires, a message whose bytes have
+            # already arrived may not be parsed yet (that takes another loop
+            # step); call_soon lets it join this window first.
+            loop.call_later(self.gather_s,
+                            lambda: loop.call_soon(self._flush, key, loop))
+        else:
+            self._flush(key, loop)
+
+    def current_job(self):
+        """Latest value per sense; one older than hold_s no longer counts."""
+        now = time.perf_counter()
+        job = {"op": "decide"}
+        for kind, vk, sk in (("looming", "looming", "side"), ("sound", "sound", "sound_side")):
+            v, s, t = self.senses.get(kind, (0.0, "center", -1e9))
+            fresh = now - t <= self.hold_s
+            job[vk], job[sk] = (v if fresh else 0.0), s
+        return job
+
+    def _flush(self, key, loop):
+        req = self.gathering.pop(key, None)
+        if req is None:             # connection went away meanwhile
+            return
+        req.job = self.current_job()
+        self.dispatch(key, req, loop)
+
+    def dispatch(self, key, req, loop):
         src = self.source()
         use_live_worker = self.live is not None and self.mode != "fallback"
-        req = Request(value, side, rid, outbox, probe=(src == "fallback"))
+        req.probe = (src == "fallback")
         prev = self.inflight.get(key)
         if prev is not None and not prev.answered and not prev.probe:
             # Superseded before the brain got to it: no reply for prev, but the
@@ -331,7 +414,7 @@ class BrainServer:
             # In fallback-due-to-failure the live brain still gets the request
             # as a probe, so we notice when it recovers. Coalescing keeps a
             # hung brain from accumulating a queue.
-            self.worker.submit(key, {"op": "looming", "value": value, "side": side},
+            self.worker.submit(key, dict(req.job),
                                lambda out: loop.call_soon_threadsafe(self._live_done, req, out))
 
     # --- connection handling -------------------------------------------------
@@ -351,7 +434,12 @@ class BrainServer:
         try:
             while True:
                 raw = await sock.recv()
-                reply = self.on_message(raw, key, outbox, loop)
+                try:
+                    reply = self.on_message(raw, key, outbox, loop)
+                except Exception as e:      # never let one message drop the client
+                    log("bad message:", repr(e))
+                    self.bad_requests += 1
+                    reply = {"type": "error", "error": "could not handle message"}
                 if reply is not None:
                     outbox.put_nowait(reply)
         except ws.ConnectionClosed:
@@ -359,6 +447,7 @@ class BrainServer:
         finally:
             if self.worker:
                 self.worker.drop(key)
+            self.gathering.pop(key, None)
             req = self.inflight.pop(key, None)
             if req and req.timer:
                 req.timer.cancel()
@@ -372,25 +461,22 @@ class BrainServer:
             msg = json.loads(raw)
             if not isinstance(msg, dict):
                 raise ValueError("not an object")
-        except ValueError:
+        except (ValueError, RecursionError):
+            self.bad_requests += 1
             return {"type": "error", "error": "bad json"}
         t = msg.get("type")
         rid = msg.get("id")
         tag = {"id": rid} if "id" in msg else {}
-        if t == "looming":
-            try:
-                v = float(msg.get("value", 0.0))
-            except (TypeError, ValueError):
-                return {"type": "error", "error": "value must be a number", **tag}
-            if math.isnan(v) or math.isinf(v):
-                return {"type": "error", "error": "value must be finite", **tag}
-            side = msg.get("side", "center")
-            if side not in SIDES:
-                side = "center"
-            self.looming(key, min(1.0, max(0.0, v)), side, rid if "id" in msg else None,
-                         outbox, loop)
+        if t in ("looming", "sound"):
+            parsed = parse_sense(msg)
+            if isinstance(parsed, str):
+                self.bad_requests += 1
+                return {"type": "error", "error": parsed, **tag}
+            v, side = parsed
+            self.sense(key, t, v, side, rid if "id" in msg else None, outbox, loop)
             return None
         if t == "reset":
+            self.senses.clear()
             if self.fallback:
                 self.fallback.reset()
             if self.worker and self.source() == "live":
@@ -421,12 +507,15 @@ class BrainServer:
         if t == "status":
             return {**self.status(), **tag}
         if t == "debug_stall" and self.debug and self.worker:
-            self.worker.submit(object(), {"op": "stall", "ms": float(msg.get("ms", 1000))},
-                               lambda out: None)
+            ms = msg.get("ms", 1000)
+            if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not 0 <= ms <= 60000:
+                return {"type": "error", "error": "ms must be a number 0..60000", **tag}
+            self.worker.submit(object(), {"op": "stall", "ms": float(ms)}, lambda out: None)
             return {"type": "stall_queued", **tag}
-        if t in ("hello", "escape"):    # hub chatter we don't need to answer
+        if isinstance(t, str) and t in ("hello", "escape"):   # hub chatter, no answer
             return None
-        return {"type": "error", "error": f"unknown type {t!r}", **tag}
+        self.bad_requests += 1
+        return {"type": "error", "error": f"unknown type {str(t)[:40]!r}", **tag}
 
     async def hub_link(self, url):
         """Keep a client connection to the hub open, reconnecting with backoff."""
@@ -469,7 +558,8 @@ def load_brains(args):
 
 async def amain(args):
     live, fallback = load_brains(args)
-    srv = BrainServer(live, fallback, args.mode, args.spin_ms, args.timeout_ms, args.debug)
+    srv = BrainServer(live, fallback, args.mode, args.spin_ms, args.timeout_ms, args.debug,
+                      args.hold_ms, args.gather_ms)
     if srv.worker:
         srv.worker.start()
     log(f"mode {srv.mode}, answering from {srv.source()}")
@@ -504,11 +594,26 @@ def main():
     ap.add_argument("--spin-ms", type=float, default=100.0,
                     help="busy-wait this long for the next request to keep the CPU "
                          "clock up (0 = off; costs one core while the game is sending)")
+    ap.add_argument("--hold-ms", type=float, default=100.0,
+                    help="a looming/sound value keeps counting this long after it arrives "
+                         "(then 0); resend at 20 Hz to sustain it")
+    ap.add_argument("--gather-ms", type=float, default=3.0,
+                    help="messages within this window share one decision and one reply "
+                         "(0 = decide on every message, as before)")
     ap.add_argument("--debug", action="store_true",
                     help="enable {'type':'debug_stall','ms':N} to test failover")
     args = ap.parse_args()
     # Let the event-loop thread grab the GIL quickly while the brain computes.
     sys.setswitchinterval(0.001)
+    if sys.platform == "win32":
+        # Windows timers otherwise tick every ~15.6 ms, which turns the 3 ms
+        # gather window into ~15 ms of added latency. 1 ms resolution while
+        # the server runs (reset automatically when the process exits).
+        try:
+            import ctypes
+            ctypes.WinDLL("winmm").timeBeginPeriod(1)
+        except (OSError, AttributeError):
+            pass
     try:
         asyncio.run(amain(args))
     except KeyboardInterrupt:

@@ -1,7 +1,9 @@
 """Stand-in hub for testing the brain without the real hub (dev only).
 
 Relays JSON between clients: whoever sends {"type":"hello","role":"brain"} is
-the brain; "looming"/"reset"/"status" from anyone else go to the brain, and the
+the brain; "looming"/"sound"/"reset"/"status"/"ping" from anyone else go to
+the brain (anything else is dropped silently, so run `bench.py validate`
+against the brain itself, not through this hub), and the
 brain's replies go back to whoever asked (by id) or to every other client.
 
 Run:  python brain/dev_hub.py --port 8800
@@ -18,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ws  # noqa: E402
 
-TO_BRAIN = {"looming", "reset", "status", "ping"}
+TO_BRAIN = {"looming", "sound", "reset", "status", "ping"}
 
 
 class Hub:
@@ -35,14 +37,16 @@ class Hub:
                 raw = await sock.recv()
                 try:
                     msg = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(msg, dict):
                     continue
                 if msg.get("type") == "hello" and msg.get("role") == "brain":
                     self.brain = sock
                     print("brain attached", flush=True)
                 elif sock is self.brain:
                     await self.from_brain(msg)
-                elif msg.get("type") in TO_BRAIN:
+                elif isinstance(msg.get("type"), str) and msg["type"] in TO_BRAIN:
                     await self.to_brain(sock, msg)
         except ws.ConnectionClosed:
             pass
