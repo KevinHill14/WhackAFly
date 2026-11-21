@@ -118,6 +118,12 @@ namespace FlyAI
         float pulseUntil;
         Vector3 pulsePoint;
         string pulseLabel = "";
+
+        // The last sound sent to the brain's ears, for the panel.
+        float lastSound;
+        string lastSoundSide = "-";
+        float lastSoundAt = -10f;
+        const float SoundSeconds = 0.35f;
         float previousPower = 1f;
         bool lightningWasOn;
         bool lightningRight;
@@ -222,6 +228,8 @@ namespace FlyAI
                 }
                 else Debug.LogWarning("[FlyAI] Fly brain is switched off (FLYAI_BRAIN=off), so the fly will not react.");
             }
+            // A new fly is a new round: the brain starts fresh, including anything it had got used to.
+            client?.RequestReset();
             Current = this;
         }
 
@@ -403,13 +411,31 @@ namespace FlyAI
             pulseLabel = label;
         }
 
-        // A loud sound near the fly (glass breaking, a swing landing). The brain only has eyes, so the game turns
-        // the sound into a looming pulse from the direction it came from; the brain still decides what the fly does.
+        // A loud sound near the fly (glass breaking, a swing landing). If the brain has ears (Johnston's organ),
+        // the sound goes to them, from the side it came from. Older brains only have eyes, so the sound becomes a
+        // looming pulse from that direction instead. Either way the brain decides what the fly does.
         public void HearNoise(Vector3 point, float loudness, float range = 8f)
         {
             if (state == State.Dead) return;
             var value = loudness * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, transform.position));
-            if (value > 0.05f) Pulse(value, 0.35f, point, "noise");
+            if (value <= 0.05f) return;
+            if (client != null && client.Connected && client.SupportsSound)
+            {
+                var side = SideOf(point);
+                client.SetSound(value, side, SoundSeconds);
+                lastSound = value;
+                lastSoundSide = side;
+                lastSoundAt = Time.time;
+            }
+            else Pulse(value, SoundSeconds, point, "noise");
+        }
+
+        // Which side of the fly a point is on, the same way the looming eye is chosen.
+        string SideOf(Vector3 point)
+        {
+            var to = point - transform.position;
+            var across = transform.InverseTransformDirection(to).x / Mathf.Max(0.001f, to.magnitude);
+            return Mathf.Abs(across) < 0.2f ? "center" : across > 0f ? "right" : "left";
         }
 
         // --- Light --------------------------------------------------------------------------------------
@@ -977,9 +1003,11 @@ namespace FlyAI
                 online ? client.url : "start brain/server.py, or set FLYAI_BRAIN",
                 "",
                 $"<b>Stimulus</b>   looming {looming:0.00}   eye {eye}   from {source}",
+                $"<b>Sound</b>      {(Time.time - lastSoundAt < SoundSeconds ? $"{lastSound:0.00} from {lastSoundSide}" : "-")}   ears {(online && client.SupportsSound ? "on" : "off: sounds sent as looming")}",
                 $"<b>Light</b>       at fly {lightLevel:0.00}   vision {vision:0.00}   flashlight on fly {flashlightOnFly:0.00}",
                 $"<b>Brain out</b>  strength {strength:0.00}   jumps {(fresh ? lastDecisionSide : "-")}",
                 $"Eye inputs     LPLC2 L{Spike(spikes, 0)} R{Spike(spikes, 1)}    LC4 L{Spike(spikes, 2)} R{Spike(spikes, 3)}",
+                $"Ear inputs     JO L{Spike(spikes, 19)} R{Spike(spikes, 20)}",
                 $"Giant Fiber    L{Spike(spikes, 9)} R{Spike(spikes, 10)}   (DNp01)",
                 $"Escape DNs     02: {Spike(spikes, 11)}/{Spike(spikes, 12)}   04: {Spike(spikes, 13)}/{Spike(spikes, 14)}   11: {Spike(spikes, 17)}/{Spike(spikes, 18)}",
                 "",

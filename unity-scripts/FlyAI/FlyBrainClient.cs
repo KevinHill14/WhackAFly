@@ -19,6 +19,7 @@ namespace FlyAI
         public string mode;
         public string source;
         public int neurons;
+        public string[] senses; // From status. Brains with an ears pathway list "sound".
     }
 
     public struct BrainEscape
@@ -28,8 +29,9 @@ namespace FlyAI
         public int[] spikes;
     }
 
-    // Talks to brain/server.py over a WebSocket: sends looming at 20 Hz, receives escape decisions.
-    // Reconnects by itself. Network work stays off the main thread; results come out through TryGetEscape.
+    // Talks to brain/server.py over a WebSocket: sends looming (and sound, if the brain has ears) at 20 Hz,
+    // receives escape decisions. Reconnects by itself. Network work stays off the main thread; results come
+    // out through TryGetEscape.
     public class FlyBrainClient : IDisposable
     {
         public const string DefaultUrl = "ws://127.0.0.1:8765";
@@ -38,12 +40,20 @@ namespace FlyAI
         public readonly string url;
         public volatile bool Connected;
         public volatile string BrainInfo = ""; // e.g. "live, 1602 neurons", from the server's status reply.
+        // True once the connected brain's status says it hears ("sound" in senses). Older brains only have
+        // eyes; then FlyAgent keeps turning sounds into looming pulses.
+        public volatile bool SupportsSound;
 
         readonly ConcurrentQueue<BrainEscape> escapes = new ConcurrentQueue<BrainEscape>();
         readonly object gate = new object();
         readonly CancellationTokenSource cancel = new CancellationTokenSource();
         float looming;
         string eye = "center";
+        float sound;
+        string ear = "center";
+        long soundUntilMs;
+        bool resetPending;
+        readonly System.Diagnostics.Stopwatch since = System.Diagnostics.Stopwatch.StartNew();
 
         public FlyBrainClient(string url)
         {
@@ -67,6 +77,27 @@ namespace FlyAI
                 looming = Mathf.Clamp01(value);
                 eye = side;
             }
+        }
+
+        // A sound reaching the fly's ears for the next `seconds`. A louder sound replaces a quieter one that is
+        // still playing. It is sent in the same 50 ms frame as the looming, so the brain combines both.
+        public void SetSound(float value, string side, float seconds)
+        {
+            lock (gate)
+            {
+                var now = since.ElapsedMilliseconds;
+                value = Mathf.Clamp01(value);
+                if (now < soundUntilMs && value <= sound) return;
+                sound = value;
+                ear = side;
+                soundUntilMs = now + (long)(seconds * 1000f);
+            }
+        }
+
+        // A new round: the brain forgets everything, including what it had got used to (habituation).
+        public void RequestReset()
+        {
+            lock (gate) resetPending = true;
         }
 
         public bool TryGetEscape(out BrainEscape escape)
@@ -93,6 +124,7 @@ namespace FlyAI
                     using (var socket = new ClientWebSocket())
                     {
                         await socket.ConnectAsync(new Uri(url), token);
+                        SupportsSound = false; // Until this brain's status says otherwise.
                         Connected = true;
                         var receiving = Receive(socket, token);
                         await Send(socket, receiving, token);
@@ -113,28 +145,43 @@ namespace FlyAI
             var clock = System.Diagnostics.Stopwatch.StartNew();
             while (socket.State == WebSocketState.Open && !receiving.IsCompleted && !token.IsCancellationRequested)
             {
-                float value;
-                string side;
+                float value, heard;
+                string side, heardSide;
+                bool reset;
                 lock (gate)
                 {
                     value = looming;
                     side = eye;
+                    heard = since.ElapsedMilliseconds < soundUntilMs ? sound : 0f;
+                    heardSide = ear;
+                    reset = resetPending;
+                    resetPending = false;
+                }
+                if (reset)
+                {
+                    await SendText(socket, "{\"type\":\"reset\"}", token);
+                    lastSent = 0f;
                 }
                 // Keep sending while the swatter is a threat, plus one more message to let the brain settle at zero.
                 if (value > 0.001f || lastSent > 0.001f)
                 {
-                    var json = string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"looming\",\"value\":{0:0.###},\"side\":\"{1}\"}}", value, side);
-                    await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)), WebSocketMessageType.Text, true, token);
+                    await SendText(socket, string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"looming\",\"value\":{0:0.###},\"side\":\"{1}\"}}", value, side), token);
                     lastSent = value;
                 }
+                // Right after the looming, in the same frame: the brain merges the two into one decision and one reply.
+                if (heard > 0.001f && SupportsSound)
+                    await SendText(socket, string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"sound\",\"value\":{0:0.###},\"side\":\"{1}\"}}", heard, heardSide), token);
                 if (clock.Elapsed.TotalSeconds >= nextStatus)
                 {
                     nextStatus = (float)clock.Elapsed.TotalSeconds + 2f;
-                    await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("{\"type\":\"status\"}")), WebSocketMessageType.Text, true, token);
+                    await SendText(socket, "{\"type\":\"status\"}", token);
                 }
                 await Task.Delay(SendIntervalMs, token);
             }
         }
+
+        static Task SendText(ClientWebSocket socket, string json, CancellationToken token) =>
+            socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)), WebSocketMessageType.Text, true, token);
 
         async Task Receive(ClientWebSocket socket, CancellationToken token)
         {
@@ -152,7 +199,10 @@ namespace FlyAI
                 {
                     var message = JsonUtility.FromJson<BrainMessage>(json);
                     if (message != null && message.type == "status")
+                    {
                         BrainInfo = $"{message.source}, {message.neurons} neurons";
+                        SupportsSound = message.senses != null && Array.IndexOf(message.senses, "sound") >= 0;
+                    }
                     else if (message != null && message.type == "escape")
                         escapes.Enqueue(new BrainEscape { strength = message.strength, side = message.side, spikes = message.spikes });
                 }

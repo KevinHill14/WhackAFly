@@ -211,7 +211,7 @@ Start the brain first (`pip install numpy`, then `python brain/server.py`; see `
 
 How it works: the brain controls the fly, and the game only supplies what the fly sees and forces where it may land.
 
-1. **In:** `FlyAgent` turns the swatter, the player walking at it, the flashlight beam and occasional passing shadows into a looming value (0-1) and the eye that sees it. `FlyBrainClient` sends it to the brain at 20 Hz.
+1. **In:** `FlyAgent` turns the swatter, the player walking at it, the flashlight beam and occasional passing shadows into a looming value (0-1) and the eye that sees it, and loud sounds into a sound value and the ear that hears it. `FlyBrainClient` sends them to the brain at 20 Hz.
 2. **Out:** the brain answers with an escape strength and a jump side.
    - Strength 0.4 or more: the fly takes off. The side sets its first turn, and the strength sets its speed and how many waypoints the flight has.
    - Strength 0.12 to 0.4: the fly walks away from the threat, toward the side the brain chose.
@@ -227,7 +227,8 @@ Light and events change what the fly sees. The panel's Light line shows the ligh
 - **Vision:** swatter, player and shadow stimuli are scaled by vision. The fly sees by the lamps and flashlight at its own spot, or the lamps on the threat. Walls and furniture block most lamp light. A blackout leaves it nearly blind.
 - **Flashlight on the fly** is a restless stimulus (up to 0.4), and passing shadows come faster while it is lit.
 - **Events:** a power surge floods it with looming that flicks between eyes. Lightning and headlights add looming from the window side. Lights cutting out give one startle.
-- **Sounds:** a swing landing, a swing missing and glass breaking (`HearNoise`) become looming pulses from where the sound came from, scaled by distance (8 m, glass 14 m). The brain then decides whether the fly bolts. Sounds work in the dark.
+- **Sounds:** a swing landing, a swing missing and glass breaking (`HearNoise`) are scaled by distance (8 m, glass 14 m) and last 0.35 s. If the brain has ears (its `status` lists `"sound"` in `senses`), they go to its Johnston's organ input as `{"type":"sound","value","side"}`, from the side of the fly they came from, sent in the same frame as the looming so the brain makes one decision from both. An older brain without ears gets them as looming pulses instead, as before. The panel's Sound line shows which (`ears on` / `off`), and the Ear inputs line shows the JO spikes. Sounds work in the dark.
+- **Rounds:** each new fly (every room load) sends `reset`, so the brain starts fresh, including any habituation (the brain getting used to repeated threats).
 
 Finding it: the buzz is loud in flight and muffled when the fly is behind you, so you can turn toward it by ear. A perched fly gives a short buzz every 3-6 s. About 1 s after it lands, a light blue marker and glow slowly brighten over 7 s; the marker sits on the fly, or at the screen edge with an arrow when it is off screen. It goes dark again when the fly takes off. `BeaconDelay` and `BeaconRamp` in `FlyAgent.cs` set the timing. The fly also reports its distance to `RoomTension` every frame. Tuning constants are at the top of `FlyAgent.cs`.
 
