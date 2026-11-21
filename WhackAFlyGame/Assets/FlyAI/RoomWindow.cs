@@ -40,7 +40,7 @@ namespace FlyAI
         {
             if (broken) return;
             broken = true;
-            FlyAgent.Current?.HearNoise(transform.position, 1f, 14f);
+            FlyAgent.Noise(transform.position, 1f, 14f);
             bars.SetActive(false);
             GetComponent<Collider>().enabled = false;
             RoomWindow.Pane(transform, 0.02f, width, height, brokenGlass);

@@ -93,7 +93,7 @@ namespace FlyAI
         readonly Queue<(float time, Quaternion aim)> aimHistory = new Queue<(float, Quaternion)>();
         readonly RaycastHit[] hits = new RaycastHit[48];
 
-        ISwatterInput input = new KeyboardMouseSwatter();
+        ISwatterInput input = new NetSwatter(new KeyboardMouseSwatter());
         CharacterController body;
         Camera view;
         FlyCamera debugCamera;
@@ -268,7 +268,8 @@ namespace FlyAI
                 frame.swing = false;
                 frame.recenter = false;
             }
-            if (finished)
+            // No walking or turning during the 3-2-1 countdown, or once the round is over.
+            if (finished || (GameRound.Current != null && !GameRound.Current.CanMove))
             {
                 frame.forward = 0f;
                 frame.turn = 0f;
@@ -299,6 +300,7 @@ namespace FlyAI
             }
             if (frame.swing && Time.time - swingStartedAt >= SwingCooldown && (GameRound.Current == null || GameRound.Current.CanSwing)) Swing(frame.swingStrength);
             AnimateSwatter();
+            BackendClient.SendPose(head.position, aimPivot.forward, swatReach);
         }
 
         // Rooms have one floor level, so the player never needs gravity. Long frames
@@ -393,6 +395,7 @@ namespace FlyAI
             playerAudio.PlayOneShot(FlySounds.Get("swing_whoosh"), Mathf.Lerp(0.3f, 0.6f, strength));
             var direction = AimBeforeSwing() * Vector3.forward;
             FlyAgent.Current?.OnSwing(head.position, direction, swatRadius, swatReach, strength);
+            BackendClient.SendSwing(head.position, direction, strength, swatReach);
             var result = new SwingResult { time = Time.time, strength = strength, target = "nothing" };
 
             var count = Physics.SphereCastNonAlloc(head.position, swatRadius, direction, hits, swatReach, ~0, QueryTriggerInteraction.Ignore);
@@ -470,7 +473,7 @@ namespace FlyAI
             FlyAgent.Current?.TrySwat(head.position, direction, swatRadius, Mathf.Min(impactDistance, swatReach) + swatRadius);
 
             // Every swing makes a sound the fly can hear: a thud where it lands, or a whoosh if it misses.
-            FlyAgent.Current?.HearNoise(result.hit ? result.point : head.position + direction, result.hit ? Mathf.Lerp(0.35f, 0.7f, strength) : 0.2f);
+            FlyAgent.Noise(result.hit ? result.point : head.position + direction, result.hit ? Mathf.Lerp(0.35f, 0.7f, strength) : 0.2f);
             Swung?.Invoke(result);
         }
 

@@ -286,7 +286,7 @@ namespace FlyAI
                 root.GetComponent<RoomAtmosphere>().MakeCurrent();
                 root.GetComponent<RoomEvents>().MakeCurrent();
                 root.GetComponent<RoomTension>().MakeCurrent();
-                FlyAgent.Spawn(root.transform, room);
+                if (!BackendClient.BeginRemoteRound(root.transform)) FlyAgent.Spawn(root.transform, room);
                 root.AddComponent<ShaderWarmup>();
                 failedScanKey = null;
                 if (currentRoot != null) Destroy(currentRoot);
@@ -516,6 +516,7 @@ namespace FlyAI
         {
             var player = PlayerController.GetOrCreate(GetCamera());
             player.Spawn(ToUnity(room.playerStart.position), YawToUnity(room.playerStart.yaw), RoomVisuals.Outline(room));
+            BackendClient.SendRoom(room, ToUnity(room.playerStart.position) + Vector3.up * 1.6f);
         }
 
         void OnDestroy() => currentImport?.Dispose();

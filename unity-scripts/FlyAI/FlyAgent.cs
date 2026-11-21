@@ -138,6 +138,7 @@ namespace FlyAI
         float restless = 1f;    // How often it gets startled, and how little it grooms.
         float nightSight = 1f;  // How well it still sees in the dark.
         float pace = 1f;        // Walking and flying speed.
+        float hearing = 1f;     // Scales how loud sounds are to it.
         GUIStyle statusStyle;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -181,15 +182,19 @@ namespace FlyAI
 
         void RollPersonality()
         {
-            skittish = Random.Range(0.8f, 1.3f);
-            restless = Random.Range(0.6f, 1.6f);
-            nightSight = Random.Range(0.7f, 1.8f);
-            pace = Random.Range(0.8f, 1.3f);
+            // The difficulty picks which side of each trait the fly can land on (see Difficulty).
+            skittish = Difficulty.Roll(0.6f, 0.9f, 1.2f, 1.6f);
+            restless = Difficulty.Roll(0.5f, 0.8f, 1.4f, 1.9f);
+            nightSight = Difficulty.Roll(0.6f, 0.9f, 1.5f, 2.2f);
+            pace = Difficulty.Roll(0.65f, 0.9f, 1.25f, 1.6f);
+            hearing = Difficulty.Roll(0.5f, 0.85f, 1.3f, 1.8f);
             var traits = new List<string>();
             if (skittish > 1.18f) traits.Add("Jittery"); else if (skittish < 0.9f) traits.Add("Calm");
             if (restless > 1.35f) traits.Add("Restless"); else if (restless < 0.8f) traits.Add("Lazy");
             if (nightSight > 1.45f) traits.Add("Night owl"); else if (nightSight < 0.9f) traits.Add("Day flyer");
             if (pace > 1.2f) traits.Add("Speedy"); else if (pace < 0.9f) traits.Add("Slow");
+            if (hearing > 1.25f) traits.Add("Sharp ears"); else if (hearing < 0.85f) traits.Add("Hard of hearing");
+            if (traits.Count > 1) { var keep = traits[Random.Range(0, traits.Count)]; traits.Remove(keep); traits.Insert(0, keep); }
             PersonalityName = traits.Count == 0 ? "Steady" : string.Join(" & ", traits.GetRange(0, Mathf.Min(2, traits.Count)));
         }
 
@@ -438,10 +443,17 @@ namespace FlyAI
 
         // A loud sound near the fly (glass breaking, a swing landing). The brain only has eyes, so the game turns
         // the sound into a looming pulse from the direction it came from; the brain still decides what the fly does.
+        // Sounds go to whichever fly is playing: the local one, or the one the Pi backend runs.
+        public static void Noise(Vector3 point, float loudness, float range = 8f)
+        {
+            if (Current != null) Current.HearNoise(point, loudness, range);
+            else BackendClient.SendSound(point, loudness, range);
+        }
+
         public void HearNoise(Vector3 point, float loudness, float range = 8f)
         {
             if (state == State.Dead) return;
-            var value = loudness * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, transform.position));
+            var value = Mathf.Clamp01(loudness * hearing * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, transform.position)));
             if (value < 0.05f) return;
             // The ears get it, not the eyes: the side is which ear the sound is nearer to.
             var local = transform.InverseTransformDirection(point - transform.position);

@@ -117,5 +117,8 @@ neurons.tsv
 # Claude Code local state
 .claude/
 
-# Fly brain: raw connectome data (fetch with brain/get_data.sh)
+# Fly brain: raw connectome data (~135 MB, fetch with brain/get_data.sh)
 brain/data/
+
+# Backend runtime files (pids and logs)
+backend/.run/

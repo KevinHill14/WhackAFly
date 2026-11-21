@@ -335,3 +335,9 @@ The XIAO ESP32S3 + LSM6DSOX (firmware branch, `firmware/src/main.cpp`, env `imu_
 3. Just start the game: it launches `firmware/imu_bridge.py` itself (and stops it on quit; `FLYAI_IMU=off` skips it). A panel appears on the left once data arrives and the sensor takes over automatically. **F10** switches it off/on: the swatter aims with the gyro (rotation) and swings when acceleration passes the threshold (default 10 m/s², F11/F12 lower/raise it). Keys still walk.
 4. If an axis is wrong: F6/F7 choose which gyro axis is yaw/pitch, F8/F9 flip them.
 Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).
+
+## Difficulty and the Pi backend
+
+- **Countdown:** the player cannot walk or turn during the 3-2-1 (`GameRound.CanMove`); aiming and the swatter stay free, swinging is blocked until HUNT.
+- **Difficulty slider** (main menu, under Theme; saved as `FlyAI.Difficulty`): Easy, Medium, Hard (`Difficulty.cs`). Each fly rolls five traits (skittish, restless, night sight, pace, hearing). Easy takes only the low side of each (slower, calmer, hard of hearing), Hard only the high side (faster, jumpier, sharp ears), Medium picks either side per trait at random, so it is a combination. The result screen shows the level.
+- **Pi backend** (`backend/`, the `backend-split` branch): `BackendClient` connects to `FLYAI_BACKEND` (default `ws://127.0.0.1:8766`; `off` disables it). If it is connected when a room loads, the backend runs the fly (`FlyView` draws it, `BeginRemoteRound`), Unity keeps the room, the round UI and the senses. Sounds go to it as `stimulus` messages, the hunt start sends `reset` with `start:true` (no second countdown), and a `squish` event wins the round. Difficulty is sent as `difficulty` (0-2) and scales its fly speed and how threatening the swatter looks. If the backend is not reachable the game runs the local `FlyAgent` and brain as before.

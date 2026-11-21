@@ -38,6 +38,7 @@ namespace FlyAI
 
         public Phase CurrentPhase { get; private set; } = Phase.Countdown;
         public bool CanSwing => CurrentPhase == Phase.Playing;
+        public bool CanMove => CurrentPhase != Phase.Countdown;
         public bool FlyActive => CurrentPhase == Phase.Playing;
         public bool Finished => CurrentPhase == Phase.Won || CurrentPhase == Phase.Lost;
 
@@ -119,6 +120,7 @@ namespace FlyAI
             Play("whistle", 1f);
             Say("announce_go"); // silent unless a recording exists
             if (fly != null) fly.OnRoundStart();
+            else BackendClient.StartRemoteHunt();
         }
 
         // Called by the fly when it is swatted.
@@ -265,7 +267,7 @@ namespace FlyAI
             var lines = new List<string>();
             if (won) lines.Add($"The fly was smushed in {timeTaken:0.0} s");
             else lines.Add("The fly got away");
-            lines.Add($"Fly: {(fly != null ? fly.PersonalityName : "unknown")}");
+            lines.Add($"Fly: {(fly != null ? fly.PersonalityName : "unknown")}   ({Difficulty.Name})");
             lines.Add($"Damage bill: ${(player != null ? player.DamageBill : 0)}");
             lines.Add($"Swings: {swings}");
             if (player != null && player.SwatterScale > 1.001f) lines.Add($"Swatter grew to {Mathf.RoundToInt(player.SwatterScale * 100f)}%");
