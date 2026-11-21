@@ -70,3 +70,19 @@ class ThresholdClassifier:
             return [{"evt": "move", "axis": AXES[l], "dir": "positive" if linear[l] > 0 else "negative",
                      "accel": round(abs(linear[l]), 2)}]
         return []
+
+
+def make_classifier(kind="threshold", model_dir=None):
+    """The single swap point. "model" loads the trained network (swatter_ml/infer.py: TFLite if a
+    runtime is installed, else plain Python from weights.json). If the model cannot load, this
+    falls back to the threshold rules so the game keeps working, and says why."""
+    if kind == "model":
+        try:
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+            from swatter_ml.infer import DEFAULT_MODEL_DIR, ModelClassifier
+            return ModelClassifier(model_dir or DEFAULT_MODEL_DIR), None
+        except Exception as e:   # missing model, wrong preprocessing version, bad file...
+            return ThresholdClassifier(), f"model classifier unavailable ({e}); using threshold"
+    return ThresholdClassifier(), None

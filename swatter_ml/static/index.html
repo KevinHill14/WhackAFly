@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swing Trainer</title>
+<style>
+:root{
+  --bg:#0d0f12; --panel:#161a20; --panel2:#1d222a; --line:#2a313b; --text:#e7ebf0; --dim:#8a95a3;
+  --accent:#7bd88f; --warn:#ffcc66; --bad:#ff6b6b; --rec:#ff4d5e;
+  --x:#ff7a7a; --y:#7bd88f; --z:#6cb6ff; --m:#d0a8ff;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0 8px 0 0;letter-spacing:.3px}
+.pill{padding:3px 9px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--dim);font-size:12px;white-space:nowrap}
+.pill.ok{color:var(--accent);border-color:#2f5a3a}.pill.bad{color:var(--bad);border-color:#5a2f34}.pill.warn{color:var(--warn);border-color:#5a4c2f}
+main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:12px;padding:12px 16px}
+@media (max-width:900px){main{grid-template-columns:minmax(0,1fr)}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);margin:0 0 8px;font-weight:600}
+canvas{width:100%;display:block;background:#0a0c0f;border-radius:6px}
+.legend{display:flex;gap:10px;font-size:12px;color:var(--dim);margin:4px 0 8px}
+.legend b{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
+button,select,input{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}button:hover{border-color:#4a5563}button:disabled{opacity:.5;cursor:default}
+input[type=range]{padding:0;width:100%}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.labels{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.labels button{display:flex;justify-content:space-between;text-align:left}
+.labels button.sel{border-color:var(--accent);background:#1f3326}
+.labels .k{color:var(--dim);font-size:11px;margin-right:6px}
+.cnt{color:var(--dim)}
+#recBtn{width:100%;padding:14px;font-size:16px;font-weight:600;background:#3a1a1f;border-color:#6a2a33;margin-top:6px}
+#recBtn.on{background:var(--rec);color:#fff}
+.pred{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.pred .big{font-size:28px;font-weight:700}
+.bars{display:grid;grid-template-columns:60px 1fr 40px;gap:3px 8px;font-size:12px;margin-top:6px}
+.bar{height:8px;background:var(--panel2);border-radius:4px;overflow:hidden;align-self:center}
+.bar i{display:block;height:100%;background:var(--accent)}
+#overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;pointer-events:none;font-size:160px;font-weight:800;color:rgba(255,255,255,.9);text-shadow:0 0 40px rgba(0,0,0,.8)}
+#overlay.rec{color:var(--rec);font-size:64px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td,th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+tr.take{cursor:pointer}tr.take:hover{background:var(--panel2)}tr.take.sel{background:#1f2a36}
+.scroll{max-height:260px;overflow:auto}
+pre{background:#0a0c0f;border-radius:6px;padding:8px;font-size:11.5px;max-height:320px;overflow:auto;white-space:pre-wrap;margin:6px 0 0}
+.muted{color:var(--dim);font-size:12px}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+@media (max-width:1100px){.grid2{grid-template-columns:minmax(0,1fr)}}
+kbd{font-size:11px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;color:var(--dim)}
+.stack>*+*{margin-top:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Swing Trainer</h1>
+  <select id="src" title="Data source">
+    <option value="live">Live swatter</option>
+    <option value="synthetic">Synthetic swatter</option>
+    <option value="replay">Replay file</option>
+  </select>
+  <input id="replayPath" placeholder="take / folder / collect.py CSV path" style="display:none;min-width:280px">
+  <button id="replayGo" style="display:none">Play</button>
+  <span id="rate" class="pill">0 Hz</span>
+  <span id="esp" class="pill">ESP32: none</span>
+  <span id="model" class="pill">model: —</span>
+  <span class="muted" style="margin-left:auto"><kbd>1</kbd>–<kbd>9</kbd> label · <kbd>Space</kbd> record · <kbd>Backspace</kbd> delete last · <kbd>[</kbd><kbd>]</kbd> strength</span>
+</header>
+
+<main>
+  <div class="stack">
+    <section>
+      <h2>Live stream</h2>
+      <div class="legend"><span>Accel (m/s², gravity included)</span><span><b style="background:var(--x)"></b>x</span><span><b style="background:var(--y)"></b>y</span><span><b style="background:var(--z)"></b>z</span></div>
+      <canvas id="cA" height="150"></canvas>
+      <div class="legend"><span>Gyro (rad/s)</span><span><b style="background:var(--x)"></b>x</span><span><b style="background:var(--y)"></b>y</span><span><b style="background:var(--z)"></b>z</span></div>
+      <canvas id="cG" height="150"></canvas>
+      <div class="legend"><span>Motion energy</span><span><b style="background:var(--m)"></b>|gyro| + 0.3·||a|−g|</span><span><b style="background:var(--warn)"></b>trigger</span></div>
+      <canvas id="cE" height="70"></canvas>
+    </section>
+
+    <div class="grid2">
+      <section>
+        <h2>Takes <span id="total" class="cnt"></span></h2>
+        <div class="row">
+          <select id="filter"><option value="">all labels</option></select>
+          <button id="refresh">Refresh</button>
+        </div>
+        <div class="scroll"><table><thead><tr><th>label</th><th>str</th><th>when</th><th>s</th><th>mode</th><th>who</th></tr></thead><tbody id="takes"></tbody></table></div>
+      </section>
+      <section>
+        <h2>Review <span id="revId" class="cnt"></span></h2>
+        <div class="legend"><span>accel m/s²</span><span>gyro rad/s ×4</span><span><b style="background:var(--warn)"></b>peak</span><span><b style="background:#2f5a3a"></b>model window</span></div>
+        <canvas id="cR" height="190"></canvas>
+        <div class="muted" id="revInfo">Click a take. The shaded part is the 0.40 s window the model sees.</div>
+        <div class="row">
+          <button id="play" disabled>▶ Play</button>
+          <button id="playStream" disabled title="Feed it through the live stream and the model">Play into stream</button>
+          <button id="del" disabled title="Delete">Delete</button>
+        </div>
+        <div class="row">
+          <select id="relabel" disabled></select>
+          <input id="restr" type="number" min="0" max="10" step="1" style="width:70px" disabled>
+          <button id="save" disabled>Save label</button>
+        </div>
+      </section>
+    </div>
+
+    <section>
+      <h2>Train &amp; export</h2>
+      <div class="row">
+        <button id="train">Train model</button>
+        <input id="holdout" placeholder="hold out person (optional)" style="width:220px">
+        <span class="muted" id="trainState"></span>
+      </div>
+      <pre id="trainLog">Trains on every take in the takes folder, reports the held-out confusion matrix, and exports model_int8.tflite + labels.json to swatter_ml/models/latest.</pre>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section>
+      <h2>Record</h2>
+      <div class="labels" id="labels"></div>
+      <div class="row"><input id="newLabel" placeholder="add label" style="flex:1"><button id="addLabel">Add</button></div>
+      <div class="row" style="justify-content:space-between"><span>Strength <b id="strV">5</b>/10</span><span class="muted">how hard</span></div>
+      <input id="str" type="range" min="0" max="10" step="1" value="5">
+      <div class="row">
+        <label>Mode <select id="mode"><option value="single">single take</option><option value="burst">burst (cut every peak)</option></select></label>
+      </div>
+      <div class="row">
+        <label>Seconds <input id="secs" type="number" min="0.5" max="120" step="0.5" value="1.5" style="width:70px"></label>
+        <label>Countdown <input id="cd" type="number" min="0" max="10" value="2" style="width:56px"></label>
+      </div>
+      <div class="row"><input id="person" placeholder="who is swinging" style="flex:1"></div>
+      <button id="recBtn">● Record <span class="muted">(Space)</span></button>
+      <div class="row"><button id="delLast" style="flex:1">Delete last take <span class="muted">(Backspace)</span></button></div>
+      <div class="muted" id="recMsg"></div>
+    </section>
+
+    <section>
+      <h2>Model, live</h2>
+      <div class="pred"><span class="big" id="pLabel">—</span><span id="pConf" class="muted"></span></div>
+      <div class="muted" id="pMeta">Predictions appear when motion crosses the trigger.</div>
+      <div class="bars" id="pBars"></div>
+      <div class="muted" style="margin-top:8px">Recent</div>
+      <div id="pHist" class="muted" style="font-size:12px"></div>
+    </section>
+  </div>
+</main>
+<div id="overlay"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const COLORS = ['--x','--y','--z'].map(v => getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+const MAG = getComputedStyle(document.documentElement).getPropertyValue('--m').trim();
+const WARN = getComputedStyle(document.documentElement).getPropertyValue('--warn').trim();
+const G = 9.80665;
+let SPEC = {trigger_energy: 2, window: 80, pre_peak: 52, post_peak: 27, sample_rate_hz: 200};
+let DEFAULT_LABELS = ['idle','aiming','swing','flick','bump'];
+let labels = [...DEFAULT_LABELS];
+try { const s = JSON.parse(localStorage.getItem('st.labels')); if (Array.isArray(s) && s.length) labels = s; } catch (e) {}
+let label = 'swing', counts = {}, status = {}, rows = [], lastSaved = [];
+const SHOW_MS = 4000;
+
+function energy(r){ const a=Math.hypot(r[1],r[2],r[3]), w=Math.hypot(r[4],r[5],r[6]); return w + 0.3*Math.abs(a-G); }
+
+// ---------- websocket ----------
+function connect(){
+  const ws = new WebSocket(`ws://${location.host}/ui`);
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'samples') { for (const r of m.rows) rows.push(r); trim(); }
+    else if (m.type === 'status' || m.type === 'train_done') { setStatus(m); if (m.type==='train_done') trainDone(m.code); }
+    else if (m.type === 'pred') showPred(m.pred);
+    else if (m.type === 'train_log') { $('trainLog').textContent += m.text; $('trainLog').scrollTop = 1e9; }
+  };
+  ws.onclose = () => { $('rate').textContent = 'server offline'; $('rate').className = 'pill bad'; setTimeout(connect, 1000); };
+}
+function trim(){ if (!rows.length) return; const t1 = rows[rows.length-1][0]; let i=0; while (i<rows.length && rows[i][0] < t1 - SHOW_MS - 200) i++; if (i) rows.splice(0,i); }
+
+function setStatus(s){
+  status = s;
+  if (document.activeElement !== $('src')) $('src').value = s.source;
+  showReplayInputs();
+  $('rate').textContent = `${s.source}: ${s.rate.toFixed(0)} Hz`;
+  $('rate').className = 'pill ' + (s.rate > 150 ? 'ok' : s.rate > 0 ? 'warn' : 'bad');
+  const live = s.live_connected || [];
+  $('esp').textContent = live.length ? `ESP32: ${live.join(', ')}` : 'ESP32: not connected';
+  $('esp').className = 'pill ' + (live.length ? 'ok' : '');
+  $('model').textContent = s.model ? `model: ${s.model_backend}` : (s.model_error || 'no model');
+  $('model').className = 'pill ' + (s.model ? 'ok' : 'warn');
+  const r = s.rec || {}, ov = $('overlay');
+  if (r.state === 'countdown') { ov.style.display='flex'; ov.className=''; ov.textContent = r.n; }
+  else if (r.state === 'recording') { ov.style.display='flex'; ov.className='rec'; ov.textContent = `● ${r.label}`; }
+  else ov.style.display='none';
+  $('recBtn').classList.toggle('on', r.state && r.state !== 'idle');
+  $('train').disabled = !!s.training;
+  if (s.training) $('trainState').textContent = 'training…';
+}
+
+// ---------- plots ----------
+function fit(c){ const d = devicePixelRatio||1, w = c.clientWidth, h = +c.getAttribute('height'); if (c.width !== w*d) { c.width = w*d; c.height = h*d; } const x = c.getContext('2d'); x.setTransform(d,0,0,d,0,0); return [x,w,h]; }
+function plot(c, data, series, opts){
+  const [x,w,h] = fit(c); x.clearRect(0,0,w,h);
+  if (!data.length) { x.fillStyle='#555'; x.fillText('no samples — pick a source', 10, 20); return; }
+  const t0 = opts.t0, t1 = opts.t1;
+  let lo = opts.lo, hi = opts.hi;
+  for (const r of data) for (const s of series) { const v = s.f(r); if (v<lo) lo=v; if (v>hi) hi=v; }
+  const X = t => (t - t0) / (t1 - t0) * w, Y = v => h - 4 - (v - lo) / (hi - lo || 1) * (h - 8);
+  if (opts.shade) { x.fillStyle='rgba(123,216,143,.10)'; x.fillRect(X(opts.shade[0]),0,X(opts.shade[1])-X(opts.shade[0]),h); }
+  if (opts.recFrom) { x.fillStyle='rgba(255,77,94,.12)'; x.fillRect(X(opts.recFrom),0,w-X(opts.recFrom),h); }
+  x.strokeStyle='#2a313b'; x.lineWidth=1; x.beginPath(); x.moveTo(0,Y(0)); x.lineTo(w,Y(0)); x.stroke();
+  if (opts.hline!=null) { x.strokeStyle=WARN; x.setLineDash([4,4]); x.beginPath(); x.moveTo(0,Y(opts.hline)); x.lineTo(w,Y(opts.hline)); x.stroke(); x.setLineDash([]); }
+  for (const s of series) {
+    x.strokeStyle = s.c; x.lineWidth = 1.4; x.beginPath();
+    data.forEach((r,i) => { const px=X(r[0]), py=Y(s.f(r)); i ? x.lineTo(px,py) : x.moveTo(px,py); }); x.stroke();
+  }
+  if (opts.vline!=null) { x.strokeStyle='#fff'; x.beginPath(); x.moveTo(X(opts.vline),0); x.lineTo(X(opts.vline),h); x.stroke(); }
+  if (opts.peak!=null) { x.strokeStyle=WARN; x.beginPath(); x.moveTo(X(opts.peak),0); x.lineTo(X(opts.peak),h); x.stroke(); }
+  x.fillStyle='#8a95a3'; x.font='11px system-ui'; x.fillText(hi.toFixed(1), 4, 12); x.fillText(lo.toFixed(1), 4, h-6);
+}
+const ACC = [1,2,3].map((k,i)=>({f:r=>r[k], c:COLORS[i]})), GYR = [4,5,6].map((k,i)=>({f:r=>r[k], c:COLORS[i]}));
+let recStart = null;
+function draw(){
+  const t1 = rows.length ? rows[rows.length-1][0] : 0, t0 = t1 - SHOW_MS;
+  const r = status.rec || {};
+  if (r.state === 'recording') { if (recStart == null) recStart = t1; } else recStart = null;
+  const o = {t0, t1, recFrom: recStart};
+  plot($('cA'), rows, ACC, {...o, lo:-12, hi:12});
+  plot($('cG'), rows, GYR, {...o, lo:-3, hi:3});
+  plot($('cE'), rows, [{f:energy, c:MAG}], {...o, lo:0, hi:SPEC.trigger_energy*2, hline:SPEC.trigger_energy});
+  requestAnimationFrame(draw);
+}
+
+// ---------- labels & recording ----------
+function renderLabels(){
+  const box = $('labels'); box.innerHTML = '';
+  labels.forEach((l,i) => {
+    const b = document.createElement('button'); b.className = l===label ? 'sel' : '';
+    b.innerHTML = `<span><span class="k">${i+1}</span>${l}</span><span class="cnt">${counts[l]||0}</span>`;
+    b.onclick = () => { label = l; renderLabels(); };
+    box.appendChild(b);
+  });
+  const all = new Set([...labels, ...Object.keys(counts)]);
+  for (const sel of [$('filter'), $('relabel')]) {
+    const v = sel.value; const keepFirst = sel.id==='filter';
+    sel.innerHTML = keepFirst ? '<option value="">all labels</option>' : '';
+    for (const l of all) sel.insertAdjacentHTML('beforeend', `<option>${l}</option>`);
+    sel.value = v;
+  }
+  const n = Object.values(counts).reduce((a,b)=>a+b,0);
+  $('total').textContent = `· ${n} total · ` + Object.entries(counts).map(([k,v])=>`${k} ${v}`).join(' · ');
+}
+$('addLabel').onclick = () => { const l = $('newLabel').value.trim().toLowerCase(); if (l && !labels.includes(l)) { labels.push(l); try{localStorage.setItem('st.labels', JSON.stringify(labels));}catch(e){} } $('newLabel').value=''; label = l||label; renderLabels(); };
+$('str').oninput = () => $('strV').textContent = $('str').value;
+async function api(path, body, method){
+  const r = await fetch(path, {method: method || (body!==undefined ? 'POST' : 'GET'), headers:{'content-type':'application/json'}, body: body!==undefined ? JSON.stringify(body) : undefined});
+  const j = await r.json().catch(()=>({})); if (!r.ok) throw new Error(j.error || r.statusText); return j;
+}
+async function record(){
+  if (status.rec && status.rec.state !== 'idle') return;
+  const strength = (label === 'idle') ? 0 : +$('str').value;
+  $('recMsg').textContent = '';
+  try {
+    const j = await api('/api/record', {label, strength, person: $('person').value.trim(), mode: $('mode').value, seconds: +$('secs').value, countdown: +$('cd').value});
+    counts = j.counts; renderLabels();
+    lastSaved = j.saved.map(s=>s.id);
+    $('recMsg').textContent = j.saved.length ? `saved ${j.saved.length} '${label}' take${j.saved.length>1?'s':''}` : 'no peaks found, nothing saved';
+    loadTakes(j.saved[0] && j.saved[0].id);
+  } catch (e) { $('recMsg').textContent = '⚠ ' + e.message; }
+}
+$('recBtn').onclick = record;
+$('delLast').onclick = async () => { const j = await api('/api/delete_last', {}); counts = j.counts; renderLabels(); $('recMsg').textContent = `deleted ${j.deleted}`; loadTakes(); };
+try { $('person').value = localStorage.getItem('st.person') || ''; } catch(e){}
+$('person').onchange = () => { try{localStorage.setItem('st.person', $('person').value);}catch(e){} };
+
+document.addEventListener('keydown', e => {
+  if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.code === 'Space') { e.preventDefault(); record(); }
+  else if (e.key === 'Backspace') { e.preventDefault(); $('delLast').click(); }
+  else if (e.key === 'Delete' && selTake) { $('del').click(); }
+  else if (e.key === '[' || e.key === ']') { $('str').value = Math.max(0, Math.min(10, +$('str').value + (e.key===']'?1:-1))); $('str').oninput(); }
+  else if (/^[1-9]$/.test(e.key) && labels[+e.key-1]) { label = labels[+e.key-1]; renderLabels(); }
+});
+
+// ---------- source ----------
+function showReplayInputs(){ const on = $('src').value === 'replay'; $('replayPath').style.display = $('replayGo').style.display = on ? '' : 'none'; }
+$('src').onchange = async () => { showReplayInputs(); if ($('src').value !== 'replay') { try { setStatus(await api('/api/source', {kind: $('src').value})); rows = []; } catch(e) { alert(e.message); } } };
+$('replayGo').onclick = async () => { try { setStatus(await api('/api/source', {kind:'replay', path: $('replayPath').value.trim(), loop:true})); rows = []; } catch(e) { alert(e.message); } };
+
+// ---------- prediction ----------
+const hist = [];
+function showPred(p){
+  $('pLabel').textContent = p.label; $('pConf').textContent = `${Math.round(p.conf*100)}%`;
+  $('pMeta').textContent = `strength ${p.strength}/10 · ${p.ms} ms inference`;
+  $('pBars').innerHTML = Object.entries(p.probs).map(([k,v]) => `<span>${k}</span><span class="bar"><i style="width:${v*100}%"></i></span><span>${Math.round(v*100)}%</span>`).join('');
+  hist.unshift(`${new Date().toLocaleTimeString()} ${p.label} ${Math.round(p.conf*100)}% s${p.strength}`); hist.length = Math.min(hist.length, 8);
+  $('pHist').innerHTML = hist.join('<br>');
+}
+
+// ---------- takes & review ----------
+let takesList = [], selTake = null, selData = null, playT = null;
+async function loadTakes(select){
+  const j = await api('/api/takes'); takesList = j.takes; counts = j.counts; renderLabels();
+  const f = $('filter').value, tb = $('takes'); tb.innerHTML = '';
+  for (const t of takesList) {
+    if (f && t.label !== f) continue;
+    const tr = document.createElement('tr'); tr.className = 'take' + (t.id===selTake?' sel':''); tr.dataset.id = t.id;
+    tr.innerHTML = `<td>${t.label}</td><td>${t.strength}</td><td>${(t.created||'').slice(5,19).replace('T',' ')}</td><td>${t.seconds}</td><td>${t.mode}</td><td>${t.person||''}</td>`;
+    tr.onclick = () => review(t.id); tb.appendChild(tr);
+  }
+  if (select) review(select);
+}
+$('filter').onchange = () => loadTakes(); $('refresh').onclick = () => loadTakes();
+async function review(id){
+  selTake = id; document.querySelectorAll('tr.take').forEach(tr => tr.classList.toggle('sel', tr.dataset.id===id));
+  try { selData = await api('/api/takes/' + encodeURIComponent(id)); } catch(e) { selData = null; return; }
+  const t = selData.take, w = selData.window;
+  $('revId').textContent = '· ' + id;
+  for (const b of ['play','playStream','del','relabel','restr','save']) $(b).disabled = false;
+  $('relabel').value = t.label; $('restr').value = t.strength;
+  const p = w.prediction;
+  $('revInfo').textContent = `${t.label} · strength ${t.strength} · ${t.samples.length} samples at ${t.sample_rate_hz} Hz · ${t.device.source}` + (p ? ` · model says ${p.label} ${Math.round(p.conf*100)}% (strength ${p.strength})` : '');
+  drawReview(null);
+}
+function drawReview(cursor){
+  if (!selData) return;
+  const t = selData.take, w = selData.window, s = t.samples; if (!s.length) return;
+  // resampled index 0 = first raw sample of the longest continuous run; for a normal take that is s[0]
+  const base = w.t0;
+  const opts = {t0: s[0][0], t1: s[s.length-1][0], shade: [base + w.window_start_ms, base + w.window_end_ms], peak: base + w.peak_ms, vline: cursor};
+  plot($('cR'), s, [...ACC, ...GYR.map(g => ({f: r => g.f(r) * 4, c: g.c}))], {...opts, lo:-12, hi:12});
+}
+$('play').onclick = () => {
+  if (!selData) return; const s = selData.take.samples; const dur = s[s.length-1][0] - s[0][0]; const start = performance.now();
+  cancelAnimationFrame(playT);
+  const step = () => { const e = performance.now() - start; drawReview(s[0][0] + Math.min(e, dur)); if (e < dur) playT = requestAnimationFrame(step); };
+  step();
+};
+$('playStream').onclick = async () => { try { setStatus(await api('/api/play/' + encodeURIComponent(selTake), {})); rows = []; } catch(e){ alert(e.message); } };
+$('del').onclick = async () => { if (!selTake) return; const j = await api('/api/takes/' + encodeURIComponent(selTake), undefined, 'DELETE'); counts = j.counts; selTake = null; selData = null; $('revId').textContent=''; $('revInfo').textContent='Deleted.'; for (const b of ['play','playStream','del','relabel','restr','save']) $(b).disabled = true; loadTakes(); };
+$('save').onclick = async () => { const j = await api('/api/takes/' + encodeURIComponent(selTake), {label: $('relabel').value, strength: +$('restr').value}); counts = j.counts; loadTakes(selTake); };
+
+// ---------- training ----------
+$('train').onclick = async () => {
+  $('trainLog').textContent = ''; $('trainState').textContent = 'training…';
+  try { await api('/api/train', {holdout_person: $('holdout').value.trim()}); } catch(e) { $('trainState').textContent = '⚠ ' + e.message; }
+};
+async function trainDone(code){
+  $('trainState').textContent = code === 0 ? 'done: model exported and loaded' : `failed (exit ${code})`;
+}
+
+(async () => {
+  try { const s = await api('/api/state'); SPEC = s.spec; counts = s.counts; setStatus(s); if (s.train_log) $('trainLog').textContent = s.train_log; } catch(e){}
+  renderLabels(); loadTakes(); connect(); requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

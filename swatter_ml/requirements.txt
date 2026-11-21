@@ -1,0 +1,8 @@
+# Laptop only: the recording UI (aiohttp) and training (TensorFlow). Python 3.9-3.12.
+#   py -3.12 -m venv .venv  &&  .venv\Scripts\pip install -r swatter_ml/requirements.txt
+# The Pi needs none of this: features.py and infer.py are standard library only, and use a
+# TFLite runtime only if one is installed.
+aiohttp==3.11.18
+tensorflow==2.18.1
+keras==3.15.1
+numpy==2.0.2

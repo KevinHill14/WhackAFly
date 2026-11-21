@@ -122,3 +122,6 @@ brain/data/
 
 # Backend runtime files (pids and logs)
 backend/.run/
+
+# Swing classifier: trained models (data/ is ignored above)
+swatter_ml/models/
