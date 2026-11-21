@@ -132,6 +132,7 @@ Laptop results (Windows, Python 3.10, NumPy 1.26):
 | Mode switches mid-game | No dropped replies, no gaps over 100 ms, no strength jump beyond normal noise |
 | Live brain stalls 1.5 s | Replies keep coming (longest silence ~250 ms), fails over, recovers |
 | No NumPy | Starts on fallback, same replies |
+| Long run (10 min at 20 Hz) | Memory flat at 46–47 MB; round trip 14 → 13 ms (rose to ~28 ms mid-run along with the laptop's CPU, then recovered) |
 
 ## On the QNX Pi
 
