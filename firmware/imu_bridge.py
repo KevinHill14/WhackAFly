@@ -24,6 +24,7 @@ import socket
 import sys
 import time
 
+GYRO_DEADZONE = 0.04   # rad/s
 PAIR = re.compile(r"(lx|ly|lz|gx|gy|gz):(-?[0-9.]+)")
 
 
@@ -94,9 +95,10 @@ def main():
             now = time.perf_counter()
             dt = min(now - last, 0.1)
             last = now
-            dg[0] += gx * dt
-            dg[1] += gy * dt
-            dg[2] += gz * dt
+            # Tiny rates are sensor noise: counting them makes the aim creep while the board sits still.
+            dg[0] += (gx if abs(gx) > GYRO_DEADZONE else 0.0) * dt
+            dg[1] += (gy if abs(gy) > GYRO_DEADZONE else 0.0) * dt
+            dg[2] += (gz if abs(gz) > GYRO_DEADZONE else 0.0) * dt
             mag = math.sqrt(lx * lx + ly * ly + lz * lz)
             peak = max(peak, mag)
             count += 1

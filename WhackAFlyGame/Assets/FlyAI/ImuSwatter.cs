@@ -127,10 +127,10 @@ namespace FlyAI
         }
     }
 
-    // The sensor test. Run firmware/imu_bridge.py, start the game, press F10: the swatter aims with the sensor and
+    // The sensor test. The game starts firmware/imu_bridge.py itself; once the sensor is live the swatter aims with the sensor and
     // swings when acceleration passes the threshold. A panel on the left shows the live readings (it appears once
     // the bridge is sending).
-    //   F10 sensor control on/off    F6/F7 which gyro axis is yaw/pitch    F8/F9 flip yaw/pitch    F11/F12 threshold
+    //   F10 sensor control on/off (it starts on)    F6/F7 which gyro axis is yaw/pitch    F8/F9 flip yaw/pitch    F11/F12 threshold
     public class ImuTest : MonoBehaviour
     {
         ImuReceiver imu;
@@ -148,32 +148,43 @@ namespace FlyAI
             DontDestroyOnLoad(new GameObject("ImuTest", typeof(ImuTest)));
         }
 
+        bool autoOn;
+
+        void SetSensorControl(bool on)
+        {
+            if (player == null) return;
+            if (on && swatter == null)
+            {
+                normal = player.InputSource;
+                swatter = new ImuSwatter(normal, imu);
+                player.SetInput(swatter);
+            }
+            else if (!on && swatter != null)
+            {
+                player.SetInput(normal);
+                swatter = null;
+            }
+        }
+
         void Awake() => imu = new ImuReceiver();
         void OnDestroy() => imu?.Dispose();
 
         void Update()
         {
             var keys = Keyboard.current;
-            if (keys == null) return;
             if (player == null)
             {
                 player = FindFirstObjectByType<PlayerController>();
-                if (player == null) { swatter = null; return; } // The room was unloaded: control goes back to normal with it.
+                if (player == null) { swatter = null; autoOn = false; return; } // The room was unloaded: control goes back to normal with it.
             }
-            if (keys.f10Key.wasPressedThisFrame)
+            // The first time the sensor is live in a room, it takes over aiming and swinging. F10 hands it back.
+            if (!autoOn && imu.Live)
             {
-                if (swatter == null)
-                {
-                    normal = player.InputSource;
-                    swatter = new ImuSwatter(normal, imu);
-                    player.SetInput(swatter);
-                }
-                else
-                {
-                    player.SetInput(normal);
-                    swatter = null;
-                }
+                autoOn = true;
+                SetSensorControl(true);
             }
+            if (keys == null) return;
+            if (keys.f10Key.wasPressedThisFrame) SetSensorControl(swatter == null);
             if (keys.f6Key.wasPressedThisFrame) ImuSwatter.YawAxis = (ImuSwatter.YawAxis + 1) % 3;
             if (keys.f7Key.wasPressedThisFrame) ImuSwatter.PitchAxis = (ImuSwatter.PitchAxis + 1) % 3;
             if (keys.f8Key.wasPressedThisFrame) ImuSwatter.YawSign = -ImuSwatter.YawSign;

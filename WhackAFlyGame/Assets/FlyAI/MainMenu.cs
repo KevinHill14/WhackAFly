@@ -80,6 +80,7 @@ namespace FlyAI
         {
             Application.quitting += GameServices.Shutdown;
             GameServices.StartBrain();
+            GameServices.StartImu();
             RoomLoader.RoomLoaded += OnRoomLoaded;
             RoomLoader.LoadFailed += OnLoadFailed;
             RefreshLevel();

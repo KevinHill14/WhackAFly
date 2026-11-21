@@ -299,6 +299,6 @@ The XIAO ESP32S3 + LSM6DSOX (firmware branch, `firmware/src/main.cpp`, env `imu_
 
 1. Keep the board still for ~2 s after plugging it in (it calibrates the gyro).
 2. `python firmware/imu_bridge.py --check` (no Unity) prints live gyro/accel and a `SWING` line whenever acceleration passes the threshold. Use it to prove the sensor works.
-3. `python firmware/imu_bridge.py`, then start the game. A panel appears on the left once data arrives. Press **F10**: the swatter now aims with the gyro (rotation) and swings when acceleration passes the threshold (default 10 m/s², F11/F12 lower/raise it). Keys still walk.
+3. Just start the game: it launches `firmware/imu_bridge.py` itself (and stops it on quit; `FLYAI_IMU=off` skips it). A panel appears on the left once data arrives and the sensor takes over automatically. **F10** switches it off/on: the swatter aims with the gyro (rotation) and swings when acceleration passes the threshold (default 10 m/s², F11/F12 lower/raise it). Keys still walk.
 4. If an axis is wrong: F6/F7 choose which gyro axis is yaw/pitch, F8/F9 flip them.
 Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).

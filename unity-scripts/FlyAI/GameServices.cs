@@ -28,6 +28,7 @@ namespace FlyAI
         static Process brain;
         static Process upload;
         static Process ingest;
+        static Process imuBridge;
         static DateTime ingestStarted;
         static readonly object IngestLock = new object();
         static CancellationTokenSource cancel;
@@ -44,6 +45,7 @@ namespace FlyAI
         {
             brain = null;
             upload = null;
+            imuBridge = null;
             cancel = null;
             BrainOnline = false;
         }
@@ -85,6 +87,21 @@ namespace FlyAI
                 var unix = Path.Combine(Root, ".venv", "bin", "python");
                 return File.Exists(unix) ? unix : "python";
             }
+        }
+
+        // --- Motion sensor ----------------------------------------------------------------------------------
+
+        // Starts firmware/imu_bridge.py, which reads the sensor board over USB and sends it to the game (see
+        // ImuSwatter). If there is no board, no script or no pyserial it just exits, and the game plays with the mouse.
+        // FLYAI_IMU=off skips it.
+        public static void StartImu()
+        {
+            if (imuBridge != null && !imuBridge.HasExited) return;
+            var setting = Environment.GetEnvironmentVariable("FLYAI_IMU");
+            if (setting != null && setting.Trim().Equals("off", StringComparison.OrdinalIgnoreCase)) return;
+            var script = Path.Combine(Root, "firmware", "imu_bridge.py");
+            if (!File.Exists(script)) return;
+            imuBridge = Launch(Python, Quote(script), false);
         }
 
         // --- Fly brain ------------------------------------------------------------------------------------
@@ -311,6 +328,8 @@ namespace FlyAI
             CancelIngest();
             KillTree(upload);
             upload = null;
+            KillTree(imuBridge);
+            imuBridge = null;
             if (brainLaunchedByUs) KillTree(brain);
             brain = null;
             brainLaunchedByUs = false;
