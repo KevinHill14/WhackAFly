@@ -11,6 +11,7 @@
 #   BRAIN_MODE=auto                      auto, live or fallback
 #   BRAIN_PORT=8765  BACKEND_PORT=8766  UDP_PORT=9000
 #   RT_PRIORITY=20                       QNX real-time priority (0 = leave at the default)
+#   PRACTICE=1                           free play: no countdown or timer, the fly respawns
 #
 # Works with plain POSIX sh and Python 3 on QNX or Linux. NumPy is optional: without
 # it the brain answers from its lookup table.
@@ -120,7 +121,9 @@ until port_open "$BRAIN_PORT"; do
 done
 echo "brain:   ws://0.0.0.0:$BRAIN_PORT  (log: backend/.run/brain.log)"
 
-python3 backend/server.py --rt-priority "$RT_PRIORITY" --port "$BACKEND_PORT" --udp-port "$UDP_PORT" --brain "ws://127.0.0.1:$BRAIN_PORT" >"$RUN/backend.log" 2>&1 &
+PRACTICE_ARG=""
+[ "${PRACTICE:-0}" = "1" ] && PRACTICE_ARG="--practice"
+python3 backend/server.py $PRACTICE_ARG --rt-priority "$RT_PRIORITY" --port "$BACKEND_PORT" --udp-port "$UDP_PORT" --brain "ws://127.0.0.1:$BRAIN_PORT" >"$RUN/backend.log" 2>&1 &
 echo $! >"$RUN/backend.pid"
 i=0
 until port_open "$BACKEND_PORT"; do

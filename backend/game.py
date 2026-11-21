@@ -12,6 +12,8 @@ SWAT_REACH = 1.6        # metres from the head; Unity sends its own value too
 HIT_RADIUS = 0.28       # how close the swing line must pass to the fly
 LOOM_RANGE = 2.2        # swatter tip closer than this starts to look threatening
 RESPAWN_S = 2.0
+COUNTDOWN_S = 3.0       # round: 3-2-1 before the hunt (matches GameRound.cs)
+ROUND_S = 60.0          # round: seconds to find and swat the fly
 FLY_SPEED = 1.4         # m/s, idle hop between spots
 ESCAPE_SPEED = 4.5      # m/s at escape strength 1
 
@@ -47,12 +49,22 @@ def _dist_point_segment(p, a, b):
 
 
 class FlyGame:
-    def __init__(self, rng=None):
+    def __init__(self, rng=None, rounds=False, countdown_s=COUNTDOWN_S, round_s=ROUND_S):
+        """rounds=True plays like the Unity GameRound: a countdown, a timed hunt, then won
+        (the fly is swatted) or lost (time up). rounds=False is free play: the fly respawns."""
         self.rng = rng or random.Random()
+        self.rounds, self.countdown_s, self.round_s = rounds, countdown_s, round_s
         self.spots = []              # list of {"id", "position", "normal"}
         self.reset()
 
+    def active(self):
+        """True while the fly may sense and react (always, in free play)."""
+        return not self.rounds or self.phase == "playing"
+
     def reset(self):
+        """Start a new round (or restart free play); the room's landing spots are kept."""
+        self.phase = "countdown" if self.rounds else "playing"
+        self.phase_time = self.countdown_s if self.rounds else 0.0
         self.score = 0
         self.swings = 0
         self.escapes = 0
@@ -96,6 +108,8 @@ class FlyGame:
         """Returns True if the fly was squished."""
         origin, direction = vec3(origin), vec3(direction)
         reach = float(reach) if isinstance(reach, (int, float)) and math.isfinite(reach) else SWAT_REACH
+        if not self.active():            # no swinging during the countdown or after the round
+            return False
         self.swings += 1
         if self.state in ("dead", "idle"):
             return False
@@ -105,13 +119,16 @@ class FlyGame:
             self.timer = RESPAWN_S
             self.score += 1
             self.events.append({"kind": "squish", "pos": list(self.pos), "score": self.score})
+            if self.rounds:
+                self.phase = "won"
+                self.events.append({"kind": "round_end", "result": "won", "time_left": round(self.phase_time, 1)})
             return True
         return False
 
     # ---- looming sent to the brain ------------------------------------
     def looming(self):
         """(value 0-1, side) describing how threatening the swatter looks."""
-        if self.tip is None or self.state in ("dead", "idle"):
+        if self.tip is None or self.state in ("dead", "idle") or not self.active():
             return 0.0, "center"
         to_tip = _sub(self.tip, self.pos)
         d = _len(to_tip)
@@ -128,7 +145,7 @@ class FlyGame:
     def on_escape(self, strength, side):
         """Brain reply. `side` is the direction the fly jumps."""
         # Ignore escapes mid-flight: replies arrive at 20 Hz and would flip the target every time.
-        if self.state in ("dead", "idle", "fleeing") or strength < 0.3 or not self.spots:
+        if self.state in ("dead", "idle", "fleeing") or strength < 0.3 or not self.spots or not self.active():
             return
         away = _sub(self.pos, self.tip if self.tip else self.head)
         away[1] = 0.0
@@ -164,7 +181,24 @@ class FlyGame:
     def tick(self, dt=1.0 / TICK_HZ):
         if not self.spots:
             return
+        if self.rounds:
+            if self.phase == "countdown":
+                self.phase_time -= dt
+                if self.phase_time <= 0:
+                    self.phase, self.phase_time = "playing", self.round_s
+                    self.events.append({"kind": "round_start", "seconds": self.round_s})
+                return
+            if self.phase in ("won", "lost"):
+                return
+            self.phase_time -= dt
+            if self.phase_time <= 0:
+                self.phase_time = 0.0
+                self.phase = "lost"
+                self.events.append({"kind": "round_end", "result": "lost", "time_left": 0.0})
+                return
         if self.state == "dead":
+            if self.rounds:
+                return                      # a round ends when the fly dies; no respawn
             self.timer -= dt
             if self.timer <= 0:
                 self._respawn()
@@ -216,5 +250,8 @@ class FlyGame:
             "distance": round(_len(_sub(self.pos, self.head)), 3),
             "score": self.score,
             "swings": self.swings,
+            "phase": self.phase,
+            "time_left": round(max(0.0, self.phase_time), 1),
+            "round_seconds": self.round_s,
             "spikes": self.spikes,
         }

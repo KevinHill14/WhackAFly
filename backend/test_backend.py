@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "brain")); sys.path.insert(0, str(ROOT / "backend"))
 import ws
 import qnx
-from game import FlyGame
+from game import FlyGame, TICK_HZ
 
 FAIL = []
 def check(ok, what):
@@ -70,6 +70,27 @@ def regression_tests():
         g.snapshot()
     check(ok and g.head == [0, 1.6, 0], "bad vectors are rejected and leave the game state intact")
 
+def round_tests():
+    print("rounds (3-2-1, timed hunt, won or lost)")
+    g = FlyGame(random.Random(1), rounds=True, countdown_s=1.0, round_s=2.0); g.set_room(SPOTS, [0, 1.6, 0])
+    check(g.phase == "countdown" and not g.active(), "a round starts with the countdown")
+    check(not g.swing([0, 1.0, 0.8], [0, 0, 1], 0.8) and g.swings == 0, "swings are ignored during the countdown")
+    g.set_pose([0.8, 1.3, 1.0], [0, -0.3, 1]); g.pos = [0.8, 1.0, 2.0]
+    check(g.looming() == (0.0, "center"), "the fly senses nothing during the countdown")
+    for _ in range(int(TICK_HZ * 1.1)): g.tick()
+    check(g.phase == "playing" and any(e["kind"] == "round_start" for e in g.events), "the hunt starts when the countdown ends")
+    for _ in range(TICK_HZ * 3): g.tick()
+    check(g.phase == "lost" and any(e.get("result") == "lost" for e in g.events), "time up is a loss")
+    check(not g.swing([0, 1.0, 0.8], [0, 0, 1], 0.8), "no swinging after the round")
+    g.reset(); check(g.phase == "countdown" and g.spots, "reset starts a new round and keeps the room")
+    g = FlyGame(random.Random(1), rounds=True, countdown_s=0.1, round_s=5.0); g.set_room(SPOTS, [0, 1.6, 0])
+    for _ in range(10): g.tick()
+    check(g.swing([0, 1.0, 0.8], [0, 0, 1], 0.8) and g.phase == "won", "swatting the fly wins the round")
+    for _ in range(TICK_HZ * 4): g.tick()
+    check(g.state == "dead" and g.phase == "won", "the fly stays dead after a win (no respawn in a round)")
+    snap = g.snapshot()
+    check(snap["phase"] == "won" and "time_left" in snap and snap["round_seconds"] == 5.0, "snapshot reports the round")
+
 def qnx_tests():
     print("qnx module")
     lat = qnx.Latency(size=5)
@@ -88,7 +109,7 @@ async def end_to_end():
     py = sys.executable
     brain = subprocess.Popen([py, str(ROOT / "brain/server.py"), "--mode", "fallback", "--port", "18765"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--port", "18766", "--udp-port", "19000",
+    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--practice", "--port", "18766", "--udp-port", "19000",
                              "--brain", "ws://127.0.0.1:18765"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         await asyncio.sleep(2)
@@ -153,8 +174,68 @@ async def end_to_end():
     finally:
         back.terminate(); brain.terminate()
 
+async def e2e_rounds():
+    print("end to end: rounds, stimulus, sound, brain mode")
+    py = sys.executable
+    brain = subprocess.Popen([py, str(ROOT / "brain/server.py"), "--mode", "auto", "--port", "18775"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--port", "18776", "--udp-port", "19010",
+                             "--countdown-seconds", "1", "--round-seconds", "4", "--brain", "ws://127.0.0.1:18775"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        await asyncio.sleep(2)
+        sock = None
+        for _ in range(20):
+            try: sock = await ws.connect("ws://127.0.0.1:18776"); break
+            except OSError: await asyncio.sleep(0.3)
+        q = asyncio.Queue()
+        async def pump():
+            try:
+                while True: await q.put(json.loads(await sock.recv()))
+            except ws.ConnectionClosed: pass
+        task = asyncio.ensure_future(pump())
+        async def until(pred, secs):
+            end = time.time() + secs
+            while time.time() < end:
+                try: m = await asyncio.wait_for(q.get(), 0.3)
+                except asyncio.TimeoutError: continue
+                if pred(m): return m
+            return None
+        await sock.send(json.dumps({"type": "room", "landingSpots": SPOTS, "head": [0, 1.6, 0]}))
+        m = await until(lambda m: m["type"] == "fly", 2)
+        check(m is not None and m["phase"] == "countdown", "a round starts in the countdown")
+        m = await until(lambda m: m["type"] == "event" and m["kind"] == "round_start", 3)
+        check(m is not None, "the backend announces the start of the hunt")
+        # Unity's own looming and a sound both reach the brain and make the fly react
+        pos = (await until(lambda m: m["type"] == "fly", 2))["pos"]
+        got = None
+        for _ in range(40):
+            await sock.send(json.dumps({"type": "stimulus", "kind": "looming", "value": 1.0, "side": "left"}))
+            await sock.send(json.dumps({"type": "stimulus", "kind": "sound", "value": 1.0, "side": "right"}))
+            got = await until(lambda m: m["type"] == "event" and m["kind"] == "escape", 0.12)
+            if got: break
+        check(got is not None, "stimulus from Unity (looming and sound) makes the fly escape")
+        for bad in ('{"type":"stimulus"}', '{"type":"stimulus","value":"x"}', '{"type":"stimulus","value":1,"side":"up"}'):
+            await sock.send(bad)
+        await sock.send(json.dumps({"type": "brain_mode", "mode": "fallback"}))
+        await sock.send(json.dumps({"type": "habituation", "enabled": False}))
+        m = await until(lambda m: m["type"] == "fly" and m.get("brain") == "fallback", 6)
+        check(m is not None, "brain_mode fallback shows up in the fly state (for a failover demo)")
+        await sock.send(json.dumps({"type": "brain_mode", "mode": "auto"}))
+        m = await until(lambda m: m["type"] == "event" and m["kind"] == "round_end", 8)
+        check(m is not None and m["result"] == "lost", "the round ends as a loss when time runs out")
+        await sock.send(json.dumps({"type": "reset"}))
+        m = await until(lambda m: m["type"] == "fly" and m["phase"] == "countdown", 2)
+        check(m is not None, "reset starts a new round")
+        check(back.poll() is None, "backend still running after all of that")
+        task.cancel(); await sock.close()
+    finally:
+        back.terminate(); brain.terminate()
+
 unit_tests()
 regression_tests()
+round_tests()
 qnx_tests()
 asyncio.run(end_to_end())
+asyncio.run(e2e_rounds())
 print("FAILED: " + ", ".join(FAIL) if FAIL else "all passed"); sys.exit(1 if FAIL else 0)
