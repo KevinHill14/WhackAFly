@@ -80,7 +80,7 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | | `RoomData` | C# classes matching `latest.json` and `room.json` |
 | | `RoomPart` | Tags a collider so a swing knows what it hit |
 | Look | `RoomTheme` | All colours and mood values; the House, Medieval and Futuristic themes |
-| | `ThemeMenu` | Theme picker (`O`, `1`-`3`), saved in `PlayerPrefs` |
+| | `ThemeMenu` | Remembers the chosen theme in `PlayerPrefs`; the picker is the Theme button on the main menu (click cycles Old House, Medieval, Futuristic) |
 | | `RoomVisuals` | Materials, gap-closing shell, lights, post-processing |
 | | `RoomSurfaces` | Textures, generated UVs, baseboards, crown molding |
 | | `RoomWindow` | Breakable window with night sky and rain |

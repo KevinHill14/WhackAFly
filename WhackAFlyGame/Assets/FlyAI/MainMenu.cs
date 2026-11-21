@@ -418,32 +418,39 @@ namespace FlyAI
             var bad = status.StartsWith("Stopped") || status.StartsWith("Could not") || status.StartsWith("Switched off");
             var color = online ? "1B7F3A" : bad ? "B02A20" : "9A6200";
             GUILayout.Label($"<color=#{color}>●</color>  Fly brain:  {status}", bodyStyle);
-            GUILayout.Space(unit * 1.2f);
+            GUILayout.Space(unit * 0.8f);
 
-            var rowHeight = GUILayout.Height(unit * 3.2f);
             GUILayout.Label("World (LiDAR scan)", bodyStyle);
             var levelText = busy ? "Processing...  (click to choose another)" : levelLabel.Length > 0 ? levelLabel : "Choose LiDAR file...";
-            if (SlotButton(levelText, buttonStyle, unit * 3.2f, 0.78f)) ChooseFile();
+            if (SlotButton(levelText, buttonStyle, unit * 2.7f, 0.78f)) ChooseFile();
             if (!busy && levelId.Length > 0 && loader != null)
             {
                 var ready = loader.LoadedId == levelId && !loader.IsLoading;
                 GUILayout.Label(ready ? "<color=#1B7F3A>Level ready</color>" : "<color=#9A6200>Getting the level ready in the background...</color>", bodyStyle);
             }
-            GUILayout.Space(unit * 0.6f);
-            if (SlotButton("Upload from phone", buttonStyle, unit * 3.2f, 0.78f)) OpenUpload();
-            GUILayout.Space(unit * 1.2f);
+            GUILayout.Space(unit * 0.4f);
+            if (SlotButton("Upload from phone", buttonStyle, unit * 2.7f, 0.78f)) OpenUpload();
+            GUILayout.Space(unit * 0.8f);
 
             GUI.enabled = !busy && levelId.Length > 0 && loader != null;
-            if (SlotButton("PLAY", playStyle, unit * 4.2f, 0.78f)) Play();
+            if (SlotButton("PLAY", playStyle, unit * 3.6f, 0.78f)) Play();
             GUI.enabled = true;
 
-            GUILayout.Space(unit * 0.8f);
+            GUILayout.Space(unit * 0.3f);
+            var theme = loader != null ? loader.Theme : ThemeMenu.SavedTheme();
+            if (SlotButton($"Theme: {theme.name}", buttonStyle, unit * 2.7f, 0.78f) && loader != null)
+            {
+                var next = ThemeMenu.Next(theme);
+                ThemeMenu.Save(next);
+                loader.SetTheme(next); // The level behind the menu is rebuilt in the new theme.
+            }
+            GUILayout.Space(unit * 0.4f);
             if (notice.Length > 0) GUILayout.Label($"<color=#B04A08>{notice}</color>", bodyStyle);
             else if (levelId.Length == 0) GUILayout.Label("Choose a LiDAR file or upload one from your phone to play.", bodyStyle);
             else if (!online) GUILayout.Label("The fly brain is not running yet, so the fly will not react until it is.", bodyStyle);
 
             GUILayout.FlexibleSpace();
-            if (SlotButton("Quit", buttonStyle, unit * 2.2f, 0.4f)) Quit();
+            if (SlotButton("Quit", buttonStyle, unit * 1.8f, 0.4f)) Quit();
         }
 
         void DrawUpload(float unit, float columnWidth)
