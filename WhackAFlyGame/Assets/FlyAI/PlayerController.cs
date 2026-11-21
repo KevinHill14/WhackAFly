@@ -231,6 +231,13 @@ namespace FlyAI
                 return;
             }
 
+            // No walking or swinging while the theme menu is open; a swing in progress still finishes.
+            if (ThemeMenu.IsOpen)
+            {
+                AnimateSwatter();
+                return;
+            }
+
             var frame = input.Read();
             if (frame.quickTurn) transform.Rotate(0f, 180f, 0f);
             transform.Rotate(0f, frame.turn * turnSpeed * Time.deltaTime, 0f);

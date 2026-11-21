@@ -384,6 +384,7 @@ namespace FlyAI
             foreach (var data in room.lights)
             {
                 if (!ColorUtility.TryParseHtmlString(data.color, out var color)) color = Color.white;
+                if (theme.lightTint.HasValue) color = Color.Lerp(color, theme.lightTint.Value, theme.lightTintAmount);
                 var go = new GameObject($"{data.id} {data.type}");
                 go.transform.SetParent(group, false);
                 go.transform.position = RoomLoader.ToUnity(data.position);

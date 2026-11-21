@@ -8,7 +8,24 @@ namespace FlyAI
     {
         const string ModelFolder = "FlyAIProps/";
 
-        public static GameObject Build(Transform parent, RoomData room)
+        // The theme folder for the build in progress. Build runs synchronously, so every model
+        // load inside it sees the same value without threading the theme through each helper.
+        static string themeFolder;
+
+        public static GameObject Build(Transform parent, RoomData room, RoomTheme theme)
+        {
+            themeFolder = theme != null ? theme.folder : null;
+            try
+            {
+                return BuildProps(parent, room);
+            }
+            finally
+            {
+                themeFolder = null;
+            }
+        }
+
+        static GameObject BuildProps(Transform parent, RoomData room)
         {
             var assets = parent.GetComponent<RoomAssets>();
             var group = new GameObject("Room Props");
@@ -299,7 +316,10 @@ namespace FlyAI
 
         static GameObject LoadModel(string name)
         {
-            var prefab = Resources.Load<GameObject>(ModelFolder + name);
+            // A theme's own model wins; otherwise the house model of the same name.
+            GameObject prefab = null;
+            if (!string.IsNullOrEmpty(themeFolder)) prefab = Resources.Load<GameObject>(ModelFolder + themeFolder + "/" + name);
+            if (prefab == null) prefab = Resources.Load<GameObject>(ModelFolder + name);
             if (prefab == null)
             {
                 Debug.LogWarning($"[FlyAI] Missing prop model: {name}");

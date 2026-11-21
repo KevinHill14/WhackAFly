@@ -111,6 +111,13 @@ namespace FlyAI
             audioSource.volume = 0.8f;
             powerDownClip = assets.Keep(CreatePowerDownClip());
             BuildHeadlight(room, outline, assets);
+            if (theme.headlightColor.HasValue && headlight != null)
+            {
+                var tint = theme.headlightColor.Value;
+                headlight.color = tint;
+                shaftColor = new Color(tint.r, tint.g, tint.b, ShaftOpacity);
+                shaftMaterial.SetColor("_BaseColor", shaftColor);
+            }
 
             var volume = GetComponentInChildren<Volume>();
             if (volume != null && volume.sharedProfile != null)

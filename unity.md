@@ -78,7 +78,8 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | Loading | `RoomLoader` | Watches for scans, loads them, builds colliders and markers; owns coordinate conversion |
 | | `RoomData` | C# classes matching `latest.json` and `room.json` |
 | | `RoomPart` | Tags a collider so a swing knows what it hit |
-| Look | `RoomTheme` | All colours and mood values |
+| Look | `RoomTheme` | All colours and mood values; the House, Medieval and Futuristic themes |
+| | `ThemeMenu` | Theme picker (`O`, `1`-`3`), saved in `PlayerPrefs` |
 | | `RoomVisuals` | Materials, gap-closing shell, lights, post-processing |
 | | `RoomSurfaces` | Textures, generated UVs, baseboards, crown molding |
 | | `RoomWindow` | Breakable window with night sky and rain |
@@ -93,7 +94,7 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | | `PropDamage` | Knock, wobble, shatter, squish; also holds lamp sway |
 | | `SwatMarks` | Free cosmetic swatter imprints, up to 512 per object |
 | Audio | `RoomAudio` | Positional sounds, room tone, rain |
-| | `FlySounds` | Generates every sound in code; no audio files |
+| | `FlySounds` | Generates every sound in code; a theme can override a sound with a file |
 | Player | `PlayerController` | Movement, aim, flashlight, swings, damage bill, HUD |
 | | `SwatterInput` | Keyboard/mouse input; a real swatter can implement `ISwatterInput` |
 | | `SwatterModel` | The swatter's 3D model |
@@ -118,6 +119,7 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | `Space` double tap | Turn 180 degrees |
 | `Space` hold 0.6 s | Recentre aim |
 | `Tab` | Switch to or from the debug camera |
+| `O` | Theme menu; `1`/`2`/`3` pick a theme while it is open (see [Themes](#themes)) |
 
 **Debug camera (after `Tab`):** hold right mouse to look, `WASD` to move, `Q`/`E` down/up, left `Shift` for speed.
 
@@ -159,7 +161,38 @@ Timing is seeded from the room outline, so a room gets the same sequence of dela
 
 ### Theme
 
-Edit `RoomThemes.Main` in `RoomTheme.cs`. To add a theme, add it to `RoomThemes.All`, then change the `theme` field in `RoomLoader`. There is no theme menu yet.
+Edit `RoomThemes.Main` in `RoomTheme.cs`. See [Themes](#themes) to add or pick a theme.
+
+### Themes
+
+Three themes ship: **Old House** (`RoomThemes.Main`, the default), **Medieval** (torch-lit stone chamber) and **Futuristic** (cool-lit space-station apartment).
+
+**Picking one in game.** A theme menu opens when the game starts.
+
+| Key | Action |
+|---|---|
+| `1` / `2` / `3` (or numpad) | Old House / Medieval / Futuristic. Only while the menu is open |
+| `O` | Open or close the menu |
+
+The choice is saved in `PlayerPrefs` (`FlyAI.Theme`) and used on the next launch. Picking a theme rebuilds the current room through the same reload as `R`. While the menu is open the player cannot walk or swing; the fly and room events keep running.
+
+**Asset overrides.** A theme with a `folder` (`"Medieval"`, `"Futuristic"`) can replace any house asset by putting a file of the same name in its subfolder. A missing file falls back to the house asset, one file at a time. The house theme has no folder and always loads the house assets.
+
+| Asset | Theme file (under `Assets/FlyAI/Art/Resources/`) | Falls back to |
+|---|---|---|
+| Prop models (props, wall decor, radio, clocks) | `FlyAIProps/<folder>/<name>.glb` | `FlyAIProps/<name>.glb` |
+| Surface textures | `FlyAITextures/<folder>/<Set>_Color.png`, `<Set>_Normal.png` (`Set` = `Wall`, `Floor`, `Ceiling`, `Wood`) | `FlyAITextures/<Set>_Color` / `_Normal`. Colour and normal maps fall back separately |
+| Sounds | `FlyAISounds/<folder>/<name>.wav` (any name in `FlySounds.AllNames`, e.g. `room_tone`, `fridge_hum`, `tv_static`, `radio_static`, `light_buzz`, `surge_whine`, `car_pass`, `footstep_0`-`2`) | The synthesised house sound |
+
+Resources paths have no extension, so any format Unity imports works (`.glb`, `.png`, `.jpg`, `.wav`, `.ogg`).
+
+**Other per-theme settings** in `RoomTheme`: `lightTint` and `lightTintAmount` blend every room lamp's colour toward a tint; `headlightColor` recolours the light that sweeps through the window (car headlights in the house). Null means no change.
+
+**Adding a theme.**
+
+1. In `RoomTheme.cs`, add a `RoomTheme` with a unique `name` and a `folder`, then add it to `RoomThemes.All`. Its position in `All` is its menu key (up to 9). Keep `Main` first.
+2. Optional: add override files under the folders above, named `<folder>`.
+3. Copy the script to `WhackAFlyGame/Assets/FlyAI/` as usual.
 
 ### Lighting
 
