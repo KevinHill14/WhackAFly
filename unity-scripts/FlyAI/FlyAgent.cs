@@ -104,6 +104,9 @@ namespace FlyAI
         float lightLevel;
         float vision = 1f;
         float flashlightOnFly;
+        float soundValue;
+        float soundUntil;
+        string soundEar = "center";
         float pulseValue;
         float pulseUntil;
         Vector3 pulsePoint;
@@ -303,7 +306,7 @@ namespace FlyAI
             {
                 // Countdown or round over: the fly goes about its business and the brain is shown nothing.
                 looming = 0f;
-                if (client != null && client.Connected) client.SetLooming(0f, "center");
+                if (client != null && client.Connected) { client.SetLooming(0f, "center"); client.SetSound(0f, "center"); }
             }
 
             switch (state)
@@ -438,7 +441,13 @@ namespace FlyAI
         {
             if (state == State.Dead) return;
             var value = loudness * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, transform.position));
-            if (value > 0.05f) Pulse(value, 0.35f, point, "noise");
+            if (value < 0.05f) return;
+            // The ears get it, not the eyes: the side is which ear the sound is nearer to.
+            var local = transform.InverseTransformDirection(point - transform.position);
+            var across = local.x / Mathf.Max(0.001f, (point - transform.position).magnitude);
+            soundEar = Mathf.Abs(across) < 0.2f ? "center" : across > 0f ? "right" : "left";
+            if (value > soundValue || Time.time >= soundUntil) soundValue = value;
+            soundUntil = Time.time + 0.35f;
         }
 
         // --- Light --------------------------------------------------------------------------------------
@@ -492,6 +501,7 @@ namespace FlyAI
                 return;
             }
             client.SetLooming(looming, eye);
+            client.SetSound(Time.time < soundUntil ? soundValue : 0f, soundEar);
             if (!client.TryGetEscape(out var decision)) return;
 
             lastStrength = decision.strength;

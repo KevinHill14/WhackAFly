@@ -50,6 +50,8 @@ namespace FlyAI
         readonly CancellationTokenSource cancel = new CancellationTokenSource();
         float looming;
         string eye = "center";
+        float sound;
+        string ear = "center";
 
         public FlyBrainClient(string url)
         {
@@ -72,6 +74,17 @@ namespace FlyAI
             {
                 looming = Mathf.Clamp01(value);
                 eye = side;
+            }
+        }
+
+        // What the ears hear (0-1) and which ear: "left", "right" or "center". Sent as a "sound" message, so the
+        // brain's Johnston's organ neurons get it, not the eyes.
+        public void SetSound(float value, string side)
+        {
+            lock (gate)
+            {
+                sound = Mathf.Clamp01(value);
+                ear = side;
             }
         }
 
@@ -115,16 +128,19 @@ namespace FlyAI
         async Task Send(ClientWebSocket socket, Task receiving, CancellationToken token)
         {
             var lastSent = 0f;
+            var lastSoundSent = 0f;
             var nextStatus = 0f;
             var clock = System.Diagnostics.Stopwatch.StartNew();
             while (socket.State == WebSocketState.Open && !receiving.IsCompleted && !token.IsCancellationRequested)
             {
-                float value;
-                string side;
+                float value, heard;
+                string side, earSide;
                 lock (gate)
                 {
                     value = looming;
                     side = eye;
+                    heard = sound;
+                    earSide = ear;
                 }
                 // Keep sending while the swatter is a threat, plus one more message to let the brain settle at zero.
                 if (value > 0.001f || lastSent > 0.001f)
@@ -132,6 +148,12 @@ namespace FlyAI
                     var json = string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"looming\",\"value\":{0:0.###},\"side\":\"{1}\"}}", value, side);
                     await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)), WebSocketMessageType.Text, true, token);
                     lastSent = value;
+                }
+                if (heard > 0.001f || lastSoundSent > 0.001f)
+                {
+                    var json = string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"sound\",\"value\":{0:0.###},\"side\":\"{1}\"}}", heard, earSide);
+                    await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)), WebSocketMessageType.Text, true, token);
+                    lastSoundSent = heard;
                 }
                 if (clock.Elapsed.TotalSeconds >= nextStatus)
                 {

@@ -103,6 +103,8 @@ namespace FlyAI
             var leftEye = new List<int>();
             var rightEye = new List<int>();
             var middle = new List<int>();
+            var leftEar = new List<int>();
+            var rightEar = new List<int>();
             var upper = new List<int>();
             var dnSlots = new Dictionary<string, int> { { "DNp01", 0 }, { "DNp02", 1 }, { "DNp04", 2 }, { "DNp06", 3 }, { "DNp11", 4 } };
             for (var i = 0; i < n; i++)
@@ -121,6 +123,8 @@ namespace FlyAI
                 else if ((name.StartsWith("LPLC2") || name.StartsWith("LC4")) && name.EndsWith("_L")) leftEye.Add(i);
                 else if ((name.StartsWith("LPLC2") || name.StartsWith("LC4")) && name.EndsWith("_R")) rightEye.Add(i);
                 else if (name == "LPLC1") (i % 2 == 0 ? leftEye : rightEye).Add(i);
+                else if (name == "JO_L") leftEar.Add(i);
+                else if (name == "JO_R") rightEar.Add(i);
                 else if (name == "other_inter") middle.Add(i);
                 else upper.Add(i);
             }
@@ -132,10 +136,16 @@ namespace FlyAI
             Place(leftEye, new Vector2(-0.52f, -0.2f), 0.31f, 0.43f, 0.2f);
             Place(rightEye, new Vector2(0.52f, -0.2f), 0.31f, 0.43f, -0.2f);
             Place(middle, new Vector2(0f, -0.2f), 0.14f, 0.5f, 0f);
+            Shuffle(leftEar, seed);
+            Shuffle(rightEar, seed);
+            Place(leftEar, new Vector2(-0.3f, -0.82f), 0.2f, 0.1f, 0.3f);
+            Place(rightEar, new Vector2(0.3f, -0.82f), 0.2f, 0.1f, -0.3f);
             Place(upper, new Vector2(0f, -0.55f), 0.1f, 0.08f, 0f);
             foreach (var i in leftEye) sizes[i] = 1.9f;
             foreach (var i in rightEye) sizes[i] = 1.9f;
             foreach (var i in middle) sizes[i] = 1.7f;
+            foreach (var i in leftEar) sizes[i] = 1.8f;
+            foreach (var i in rightEar) sizes[i] = 1.8f;
             foreach (var i in upper) sizes[i] = 3f;
 
             BuildTextures();
