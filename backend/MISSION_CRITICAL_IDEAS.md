@@ -61,8 +61,8 @@ Train a small classifier on labelled swatter motions so the Pi, not fixed thresh
 which gesture happened. It would run on the Pi under QNX, which also answers the "use an
 open-source AI module from QNX" requirement.
 
-- Data: `pi_server/collect_training_data.py` (on the `firmware` branch) records labelled IMU
-  windows: swing left/right/up/down, rotate clockwise/counterclockwise, idle.
+- Data: `backend/collect.py` records labelled IMU windows: swing left/right/up/down,
+  rotate clockwise/counterclockwise, idle.
 - Model: small 1D CNN or MLP, trained on a laptop, exported to ONNX.
 - Runtime on the Pi: OpenCV's `cv2.dnn` (`python3-opencv` in the Pi's package list) or `ncnn`.
   Neither is installed, and nothing has been run on QNX yet.
@@ -77,7 +77,5 @@ open-source AI module from QNX" requirement.
 
 - Which open-source AI modules from QNX count (the Pi's package list has `opencv`, `llama.cpp`,
   `ncnn`, `mediapipe`; none is installed)?
-- The `firmware` branch's collector listens on port 8765, the same port as the brain. One must
-  move (`BRAIN_PORT` in `start.sh`, or `--port` on the server).
 - Which network will the demo use (hotspot or the Pi's own access point), and how will the Pi's
   address be found (it comes from DHCP and may change)?

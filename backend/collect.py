@@ -8,7 +8,6 @@ each action in turn, counts down 3-2-1, records a short window of samples, and a
 a CSV. The order is shuffled every round so one action is not always recorded first.
 
 CSV columns: timestamp, ax, ay, az, gx, gy, gz, label, trial_id, person
-(Daniel's pi_server/collect_training_data.py writes the same columns without `person`.)
 Record several people with the sensor fixed on the swatter in its final position, then
 keep one person's rows aside to test the trained model on someone it has not seen.
 """

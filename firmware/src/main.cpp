@@ -27,7 +27,7 @@ constexpr char WIFI_PASSWORD[] = "blwt3316";
 
 // ---- WebSocket (Raspberry Pi training-data server) --------------------------
 constexpr char PI_HOST[] = "172.20.10.10";
-constexpr uint16_t PI_PORT = 8765;
+constexpr uint16_t PI_PORT = 8767;  // backend's swatter-data receiver, not the brain's 8765
 constexpr char PI_WS_PATH[] = "/";
 // -----------------------------------------------------------------------------
 
