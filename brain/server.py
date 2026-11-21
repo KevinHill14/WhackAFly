@@ -163,6 +163,8 @@ class BrainWorker(threading.Thread):
                     r = self.brain.decide(job["value"], job["side"])
                     out = {"type": "escape", "strength": r["strength"],
                            "side": r["side"], "spikes": r["spikes"]}
+                    if "active" in r:
+                        out["active"] = r["active"]
                     self.decisions += 1
                     dt = time.perf_counter() - t0
                     self.last_ms = dt * 1000
@@ -251,7 +253,8 @@ class BrainServer:
                       threshold=self.live.threshold, max_rate_hz=self.live.max_rate_hz,
                       decisions=w.decisions, coalesced=w.coalesced,
                       last_step_ms=round(w.last_ms, 2),
-                      avg_step_ms=round(w.avg_step_ms(), 2))
+                      avg_step_ms=round(w.avg_step_ms(), 2),
+                      neuron_groups=self.live.group_id.tolist())   # group index of every neuron (for the game's brain view)
         return st
 
     # --- answering -----------------------------------------------------------

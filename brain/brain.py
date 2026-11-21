@@ -206,6 +206,7 @@ class FlyBrain:
             self.jump = "right" if left_threat > right_threat else "left"
         return {"type": "escape", "strength": round(float(strength), 3),
                 "side": self.jump, "spikes": g.tolist(),
+                "active": np.flatnonzero(counts).tolist(),   # indices of neurons that fired (for the game's brain view)
                 "gf": [int(g[name("DNp01_L")]), int(g[name("DNp01_R")])],
                 "vote": [int(left_threat), int(right_threat)]}
 

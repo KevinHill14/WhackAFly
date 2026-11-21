@@ -52,6 +52,7 @@ namespace FlyAI
         public float SwatterScale { get; private set; } = 1f;
         string swatterGrewNote = "";
         public bool Sneaking { get; private set; }
+        bool mouseFreedByPlayer;
         public Light Flashlight { get; private set; }
         public Transform Head => head;
         public Transform SwatterTransform => swatter;
@@ -66,6 +67,12 @@ namespace FlyAI
             swatRadius = BaseSwatRadius * scale;
             if (swatter != null) swatter.localScale = Vector3.one * scale;
             if (announce && grew) swatterGrewNote = $"  The swatter grew! Now {Mathf.RoundToInt(scale * 100f)}%";
+        }
+
+        // A floating word at a point in the room, like the damage numbers.
+        public void AddPopup(Vector3 point, string text, Color color, int size = 26)
+        {
+            popups.Add(new DamagePopup { point = point, text = text, born = Time.unscaledTime, color = color, size = size });
         }
 
         public void ToggleFlashlight()
@@ -111,6 +118,8 @@ namespace FlyAI
             public Vector3 point;
             public string text;
             public float born;
+            public Color color;
+            public int size;
         }
 
         public static PlayerController GetOrCreate(Camera camera)
@@ -214,24 +223,48 @@ namespace FlyAI
         void Update()
         {
             var keyboard = Keyboard.current;
+            if (MainMenu.Active) return;
             if (keyboard != null && keyboard.tabKey.wasPressedThisFrame) SetPlaying(!playing);
             if (!playing) return;
             KeepInRoom();
 
-            if (Cursor.lockState != CursorLockMode.Locked)
+            // The mouse is captured for aiming. It is taken automatically when the game has focus, unless the player
+            // freed it with Esc or the round is over. Walking and turning work either way; aiming and swinging need
+            // the mouse captured, and a click captures it.
+            var finished = GameRound.Current != null && GameRound.Current.Finished;
+            if (keyboard != null && keyboard.escapeKey.wasPressedThisFrame) mouseFreedByPlayer = true;
+            var captured = Cursor.lockState == CursorLockMode.Locked;
+            if (!captured)
             {
                 shake = 0f;
                 UpdateShake();
                 var mouse = Mouse.current;
-                if (mouse != null && mouse.leftButton.wasPressedThisFrame)
+                if (mouse != null && mouse.leftButton.wasPressedThisFrame && !UiHit.Over(mouse.position.ReadValue()) && !finished)
+                {
+                    mouseFreedByPlayer = false;
+                    Cursor.lockState = CursorLockMode.Locked;
+                    Cursor.visible = false;
+                }
+                else if (!mouseFreedByPlayer && !finished && Application.isFocused)
                 {
                     Cursor.lockState = CursorLockMode.Locked;
                     Cursor.visible = false;
                 }
-                return;
             }
 
             var frame = input.Read();
+            if (!captured)
+            {
+                frame.aimDelta = Vector2.zero;
+                frame.swing = false;
+                frame.recenter = false;
+            }
+            if (finished)
+            {
+                frame.forward = 0f;
+                frame.turn = 0f;
+                frame.quickTurn = false;
+            }
             if (frame.quickTurn) transform.Rotate(0f, 180f, 0f);
             transform.Rotate(0f, frame.turn * turnSpeed * Time.deltaTime, 0f);
 
@@ -255,7 +288,7 @@ namespace FlyAI
                 if (RoomAtmosphere.Current != null) RoomAtmosphere.Current.Ping();
                 message = "Ping";
             }
-            if (frame.swing && Time.time - swingStartedAt >= SwingCooldown) Swing(frame.swingStrength);
+            if (frame.swing && Time.time - swingStartedAt >= SwingCooldown && (GameRound.Current == null || GameRound.Current.CanSwing)) Swing(frame.swingStrength);
             AnimateSwatter();
         }
 
@@ -411,7 +444,7 @@ namespace FlyAI
                 message += swatterGrewNote;
                 swatterGrewNote = "";
                 if (result.damage > 0)
-                    popups.Add(new DamagePopup { point = result.point, text = $"-${result.damage}", born = Time.unscaledTime });
+                    popups.Add(new DamagePopup { point = result.point, text = $"-${result.damage}", born = Time.unscaledTime, color = new Color(1f, 0.26f, 0.18f), size = 26 });
 
                 var impact = window != null ? "window_smash" : prop != null ? prop.ImpactSound : ImpactFor(part);
                 playerAudio.PlayOneShot(FlySounds.Get(impact), window != null ? 1f : Mathf.Lerp(0.5f, 0.95f, strength));
@@ -423,6 +456,10 @@ namespace FlyAI
             {
                 message = "Whiff";
             }
+            // The fly is hit if it is inside the swatter's hit zone: the same spot the imprint lands.
+            var impactDistance = part == null ? swatReach : (nearest < float.MaxValue ? nearest : nearestBoundary);
+            FlyAgent.Current?.TrySwat(head.position, direction, swatRadius, Mathf.Min(impactDistance, swatReach) + swatRadius);
+
             // Every swing makes a sound the fly can hear: a thud where it lands, or a whoosh if it misses.
             FlyAgent.Current?.HearNoise(result.hit ? result.point : head.position + direction, result.hit ? Mathf.Lerp(0.35f, 0.7f, strength) : 0.2f);
             Swung?.Invoke(result);
@@ -545,17 +582,19 @@ namespace FlyAI
                 }
                 var screen = view.WorldToScreenPoint(popups[i].point + Vector3.up * (0.08f + age * 0.34f));
                 if (screen.z <= 0f) continue;
-                var box = new Rect(screen.x - 80f, Screen.height - screen.y - 20f, 160f, 40f);
+                var box = new Rect(screen.x - 120f, Screen.height - screen.y - 28f, 240f, 56f);
                 var alpha = 1f - age * age;
+                popupStyle.fontSize = popups[i].size;
                 popupStyle.normal.textColor = new Color(0f, 0f, 0f, alpha * 0.8f);
                 GUI.Label(new Rect(box.x + 2f, box.y + 2f, box.width, box.height), popups[i].text, popupStyle);
-                popupStyle.normal.textColor = new Color(1f, 0.26f, 0.18f, alpha);
+                popupStyle.normal.textColor = new Color(popups[i].color.r, popups[i].color.g, popups[i].color.b, alpha);
                 GUI.Label(box, popups[i].text, popupStyle);
             }
         }
 
         void OnGUI()
         {
+            if (MainMenu.Active) return;
             if (!playing)
             {
                 GUI.Label(new Rect(16, 12, 500, 24), "Debug camera. Tab returns to the player.");

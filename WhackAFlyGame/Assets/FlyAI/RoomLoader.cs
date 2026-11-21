@@ -14,10 +14,21 @@ namespace FlyAI
 
         RoomTheme theme = RoomThemes.Main;
 
+        // The main menu turns this on when Play is pressed. With the menu skipped (FLYAI_SKIP_MENU) it is on from the start.
+        public bool AutoLoad = true;
+        public string LoadedId => loadedId;
+        public bool IsLoading => loading;
+        public static event System.Action RoomLoaded;
+        public static event System.Action<string> LoadFailed;
+        public string DataDirectory => dataDirectory;
+
         string dataDirectory;
         string loadedId;
         string failedScanKey;
         bool loading;
+        int loadGeneration;     // Raised to cancel a load that is in progress.
+        string loadingKey;
+        bool reloadPending;
         float nextCheck;
         GameObject currentRoot;
         GltfImport currentImport;
@@ -85,12 +96,45 @@ namespace FlyAI
 
         void Update()
         {
-            if (Time.unscaledTime < nextCheck || loading) return;
+            if (!AutoLoad || Time.unscaledTime < nextCheck) return;
             nextCheck = Time.unscaledTime + 1f;
+            if (loading)
+            {
+                // A different level was chosen while this one is still loading: drop the old one, then load the new.
+                var latestPath = Path.Combine(dataDirectory, "latest.json");
+                if (File.Exists(latestPath) && File.GetLastWriteTimeUtc(latestPath).Ticks.ToString() != loadingKey) loadGeneration++;
+                return;
+            }
             CheckForScan(false);
         }
 
-        public void ReloadScan() => CheckForScan(true);
+        public void ReloadScan()
+        {
+            if (!AutoLoad) return;
+            if (loading)
+            {
+                loadGeneration++;
+                reloadPending = true;
+                return;
+            }
+            CheckForScan(true);
+        }
+
+        // Removes the loaded room (the main menu does this when going back to it).
+        public void Unload()
+        {
+            loadGeneration++;
+            if (currentRoot != null) Destroy(currentRoot);
+            currentImport?.Dispose();
+            currentRoot = null;
+            currentImport = null;
+            loadedId = null;
+            failedScanKey = null;
+            debugBoxes = null;
+            markerSet = null;
+            propGroup = null;
+            ceilingOwner = null;
+        }
 
         public void ToggleDebugBoxes()
         {
@@ -179,6 +223,8 @@ namespace FlyAI
             if (!force && scanKey == failedScanKey) return;
 
             loading = true;
+            var generation = loadGeneration;
+            loadingKey = scanKey;
             GltfImport import = null;
             GameObject root = null;
             var camera = GetCamera();
@@ -194,14 +240,14 @@ namespace FlyAI
 
                 import = new GltfImport();
                 if (!await import.Load(bytes)) throw new InvalidDataException("glTFast could not read the scan.");
-                if (this == null) return; // Play mode ended during the load.
+                if (this == null || generation != loadGeneration) return; // Play mode ended, or another level was chosen.
 
                 root = new GameObject($"Room {latest.id}");
                 var mesh = new GameObject("Mesh");
                 mesh.transform.SetParent(root.transform, false);
                 if (!await import.InstantiateMainSceneAsync(mesh.transform))
                     throw new InvalidDataException("glTFast could not create the scene.");
-                if (this == null) return;
+                if (this == null || generation != loadGeneration) return;
 
                 RoomVisuals.Apply(root.transform, mesh.transform, room, theme, camera);
                 BuildColliders(root.transform, room);
@@ -216,6 +262,7 @@ namespace FlyAI
                 root.GetComponent<RoomEvents>().MakeCurrent();
                 root.GetComponent<RoomTension>().MakeCurrent();
                 FlyAgent.Spawn(root.transform, room);
+                root.AddComponent<ShaderWarmup>();
                 failedScanKey = null;
                 if (currentRoot != null) Destroy(currentRoot);
                 currentImport?.Dispose();
@@ -232,12 +279,14 @@ namespace FlyAI
                 root = null;
                 import = null;
                 Debug.Log($"[FlyAI] Loaded {latest.id}: {room.walls.Length} walls, {room.objects.Length} objects, {room.floor.area} m2");
+                RoomLoaded?.Invoke();
             }
             catch (Exception error)
             {
                 failedScanKey = scanKey;
                 if (camera != null) camera.farClipPlane = previousFarClip;
                 Debug.LogError($"[FlyAI] Scan load failed: {error}");
+                LoadFailed?.Invoke(error.Message);
             }
             finally
             {
@@ -248,6 +297,11 @@ namespace FlyAI
                 }
                 import?.Dispose();
                 loading = false;
+                if (reloadPending && this != null)
+                {
+                    reloadPending = false;
+                    CheckForScan(true);
+                }
             }
         }
 

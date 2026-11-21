@@ -33,6 +33,9 @@ catch(x){out.textContent='Failed: '+x}send.disabled=false}</script></body></html
 
 
 def lan_ip():
+    override = os.environ.get("FLYAI_HOST")  # Set this if the wrong network address is picked.
+    if override:
+        return override
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         probe.connect(("10.255.255.255", 1))
@@ -87,7 +90,7 @@ async def upload(request):
                     raise ScanError("The file is too large.")
                 handle.write(chunk)
         summary = await asyncio.to_thread(process_scan, source, out_dir, request.app["ai"])
-        publish(scan_id)
+        publish(scan_id, part.filename)
         published = True
     except ScanError as error:
         print(f"[upload] rejected: {error}")
@@ -117,6 +120,7 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--token", help="Fixed upload token, for testing")
     parser.add_argument("--ai", action="store_true", help="Run the optional Claude cleanup pass on uploads")
+    parser.add_argument("--info", help="Write the upload link and QR code to this JSON file (used by the game menu)")
     arguments = parser.parse_args()
     token = arguments.token or secrets.token_urlsafe(9)
     url = f"http://{lan_ip()}:{arguments.port}/?token={token}"
@@ -125,6 +129,10 @@ def main():
     code.make()
     print("\nScan with the iPhone camera (same Wi-Fi or hotspot):\n")
     code.print_ascii(invert=True)
+    if arguments.info:
+        matrix = ["".join("1" if cell else "0" for cell in row) for row in code.get_matrix()]
+        with open(arguments.info, "w", encoding="utf-8") as handle:
+            json.dump({"url": url, "matrix": matrix}, handle)
     print(f"\n{url}\n\nWaiting for uploads. Press Ctrl+C to stop.")
     web.run_app(create_app(token, arguments.ai), host="0.0.0.0", port=arguments.port, print=None)
 

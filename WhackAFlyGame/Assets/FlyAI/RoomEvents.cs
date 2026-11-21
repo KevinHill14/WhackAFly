@@ -86,6 +86,7 @@ namespace FlyAI
         float nextLightning;
         float thunderAt = -1f;
         bool buzzPlayed = true;
+        bool slamPlayed = true;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         static void ResetStatics() => Current = null;
@@ -171,6 +172,7 @@ namespace FlyAI
             surgeActive = true;
             surgeStart = Time.time;
             buzzPlayed = false;
+            slamPlayed = false;
             audioSource.PlayOneShot(FlySounds.Get("surge_whine"), 0.8f);
         }
 
@@ -241,6 +243,12 @@ namespace FlyAI
             }
             else if (t < slamAt + SurgeSlam)
             {
+                if (!slamPlayed)
+                {
+                    slamPlayed = true;
+                    var bang = FlySounds.Get("surge_slam"); // silent unless a recording exists
+                    if (bang != null) audioSource.PlayOneShot(bang, 0.9f);
+                }
                 var slam = (t - slamAt) / SurgeSlam;
                 Surge = 1f - slam;
                 surgeDim = slam;

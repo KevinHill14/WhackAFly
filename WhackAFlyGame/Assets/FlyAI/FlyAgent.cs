@@ -24,8 +24,7 @@ namespace FlyAI
         const float BodyScale = 1f;            // Raise to make the fly easier to see.
         const float EscapeThreshold = 0.4f;    // Brain strength that makes the fly take off.
         const float FleeThreshold = 0.12f;     // Brain strength that makes it walk away.
-        const float SwatDelay = 0.12f;         // A swing lands this long after it starts, so a quick escape can dodge it.
-        const float KillPadding = 0.04f;       // Added to the swatter radius when a swing lands.
+        const float KillPadding = 0.06f;       // Added to the swatter radius: the fly counts as hit this close to the impact.
         const float LiftFromSurface = 0.012f;
         const float WalkSpeed = 0.1f;          // Metres per second while strolling.
         const float MinVision = 0.12f;         // How much it still sees in total darkness.
@@ -40,19 +39,10 @@ namespace FlyAI
             public Vector3 normal;
         }
 
-        struct Swat
-        {
-            public float time;
-            public Vector3 origin;
-            public Vector3 direction;
-            public float radius;
-            public float reach;
-        }
-
         static FlyBrainClient client;
+        public static FlyBrainClient BrainClient => client;
 
         readonly List<Spot> spots = new List<Spot>();
-        readonly List<Swat> swats = new List<Swat>();
         readonly List<Vector3> route = new List<Vector3>();
         List<int>[] neighbours;
         State state = State.Perched;
@@ -138,6 +128,13 @@ namespace FlyAI
         float nextChirp;
         float chirpUntil;
         bool showStatus = true;
+
+        // Personality: rolled for each fly. It only scales what the fly senses and how it moves; the brain still decides.
+        public string PersonalityName { get; private set; } = "Steady";
+        float skittish = 1f;    // Scales every stimulus sent to the brain.
+        float restless = 1f;    // How often it gets startled, and how little it grooms.
+        float nightSight = 1f;  // How well it still sees in the dark.
+        float pace = 1f;        // Walking and flying speed.
         GUIStyle statusStyle;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -179,8 +176,30 @@ namespace FlyAI
             return agent;
         }
 
+        void RollPersonality()
+        {
+            skittish = Random.Range(0.8f, 1.3f);
+            restless = Random.Range(0.6f, 1.6f);
+            nightSight = Random.Range(0.7f, 1.8f);
+            pace = Random.Range(0.8f, 1.3f);
+            var traits = new List<string>();
+            if (skittish > 1.18f) traits.Add("Jittery"); else if (skittish < 0.9f) traits.Add("Calm");
+            if (restless > 1.35f) traits.Add("Restless"); else if (restless < 0.8f) traits.Add("Lazy");
+            if (nightSight > 1.45f) traits.Add("Night owl"); else if (nightSight < 0.9f) traits.Add("Day flyer");
+            if (pace > 1.2f) traits.Add("Speedy"); else if (pace < 0.9f) traits.Add("Slow");
+            PersonalityName = traits.Count == 0 ? "Steady" : string.Join(" & ", traits.GetRange(0, Mathf.Min(2, traits.Count)));
+        }
+
+        // Called when the round's countdown ends.
+        public void OnRoundStart()
+        {
+            nextAmbient = Time.time + Random.Range(4f, 8f) / restless;
+            cooldownUntil = Time.time + 0.5f;
+        }
+
         void Init(List<Spot> landing, RoomAssets assets, float ceiling)
         {
+            RollPersonality();
             ceilingHeight = ceiling > 1f ? ceiling : 2.5f;
             spots.AddRange(landing);
             BuildGraph();
@@ -223,6 +242,7 @@ namespace FlyAI
                 else Debug.LogWarning("[FlyAI] Fly brain is switched off (FLYAI_BRAIN=off), so the fly will not react.");
             }
             Current = this;
+            GameRound.Begin(transform.parent, this);
         }
 
         // Landing spots on the same surface (same plane, close together) are joined so the fly can walk between them.
@@ -247,6 +267,7 @@ namespace FlyAI
         void OnDestroy()
         {
             if (Current == this) Current = null;
+            UiHit.Clear("brain");
             if (glowTexture != null) Destroy(glowTexture);
         }
 
@@ -254,7 +275,6 @@ namespace FlyAI
         public void OnSwing(Vector3 origin, Vector3 direction, float radius, float reach, float strength)
         {
             if (state == State.Dead) return;
-            swats.Add(new Swat { time = Time.time + SwatDelay, origin = origin, direction = direction, radius = radius, reach = reach });
             // A swing aimed at the fly is a big looming shape; one aimed elsewhere barely registers.
             var toFly = transform.position - origin;
             swingThreat = toFly.magnitude < reach + 0.6f
@@ -272,10 +292,19 @@ namespace FlyAI
             if (player == null || state == State.Dead) return;
 
             var dt = Time.deltaTime;
-            UpdateStimulus(dt);
-            UpdateBrain();
-            ResolveSwats();
-            if (state == State.Dead) return;
+            var round = GameRound.Current;
+            if (round == null || round.FlyActive)
+            {
+                UpdateStimulus(dt);
+                UpdateBrain();
+                if (state == State.Dead) return;
+            }
+            else
+            {
+                // Countdown or round over: the fly goes about its business and the brain is shown nothing.
+                looming = 0f;
+                if (client != null && client.Connected) client.SetLooming(0f, "center");
+            }
 
             switch (state)
             {
@@ -305,7 +334,7 @@ namespace FlyAI
             lightLevel = RoomLightAt(position) + beam;
             flashlightOnFly = beam;
             var lightOnThreat = RoomLightAt(swatterPosition);
-            vision = Mathf.Lerp(MinVision, 1f, Mathf.Clamp01(Mathf.Max(lightLevel * 0.8f, lightOnThreat) / FullVisionLight));
+            vision = Mathf.Lerp(Mathf.Min(0.5f, MinVision * nightSight), 1f, Mathf.Clamp01(Mathf.Max(lightLevel * 0.8f, lightOnThreat) / FullVisionLight));
 
             var best = 0f;
             source = "none";
@@ -349,7 +378,7 @@ namespace FlyAI
             if (beam > 0.2f) nextAmbient -= dt * beam * 2f;
             if (state != State.Flying && Time.time >= nextAmbient)
             {
-                nextAmbient = Time.time + Random.Range(6f, 14f);
+                nextAmbient = Time.time + Random.Range(6f, 14f) / restless;
                 ambientUntil = Time.time + 0.3f;
                 ambientValue = Random.Range(0.6f, 1f);
                 ambientPoint = SidePoint(Random.value < 0.5f);
@@ -387,7 +416,7 @@ namespace FlyAI
             // Sounds (see HearNoise) and other short pulses.
             if (Time.time < pulseUntil) Consider(pulseValue, pulseLabel, pulsePoint);
 
-            looming = Mathf.Clamp01(best);
+            looming = Mathf.Clamp01(best * skittish);
             lastThreat = threat;
             var local = transform.InverseTransformDirection(threat - position);
             var across = local.x / Mathf.Max(0.001f, (threat - position).magnitude);
@@ -469,6 +498,7 @@ namespace FlyAI
             lastDecisionSide = decision.side;
             lastDecisionAt = Time.time;
             if (decision.spikes != null) lastSpikes = decision.spikes;
+            NeuralView.Current?.Feed(decision.active, decision.spikes);
             if (state == State.Flying || Time.time < cooldownUntil) return;
 
             if (decision.strength >= EscapeThreshold)
@@ -485,16 +515,16 @@ namespace FlyAI
             }
         }
 
-        void ResolveSwats()
+        // Called by the player when a swing lands. The swatter's hit zone is where its imprint goes: the line from
+        // the player to the impact point (or to full reach in open air), as wide as the swatter. The fly is hit
+        // if it is inside it at that moment, so it cannot dodge once the swing has started.
+        public bool TrySwat(Vector3 origin, Vector3 direction, float radius, float length)
         {
-            for (var i = swats.Count - 1; i >= 0; i--)
-            {
-                var swat = swats[i];
-                if (Time.time < swat.time) continue;
-                swats.RemoveAt(i);
-                var closest = ClosestOnSegment(swat.origin, swat.origin + swat.direction * swat.reach, transform.position);
-                if (Vector3.Distance(closest, transform.position) <= swat.radius + KillPadding) Die();
-            }
+            if (state == State.Dead) return false;
+            var closest = ClosestOnSegment(origin, origin + direction * length, transform.position);
+            if (Vector3.Distance(closest, transform.position) > radius + KillPadding) return false;
+            Die();
+            return true;
         }
 
         static Vector3 ClosestOnSegment(Vector3 a, Vector3 b, Vector3 p)
@@ -515,8 +545,10 @@ namespace FlyAI
             wingLeft.gameObject.SetActive(false);
             wingRight.gameObject.SetActive(false);
             foreach (var leg in legs) leg.gameObject.SetActive(false);
-            AudioSource.PlayClipAtPoint(FlySounds.Get("impact_squish"), transform.position, 0.8f);
-            player.Announce("You got the fly!  (R to reload the room)");
+            var splat = FlySounds.Get("fly_splat") ?? FlySounds.Get("impact_squish");
+            AudioSource.PlayClipAtPoint(splat, transform.position, 0.8f);
+            if (GameRound.Current != null) GameRound.Current.Win(transform.position);
+            else player.Announce("You got the fly!  (R to reload the room)");
         }
 
         // --- Perching and walking ------------------------------------------------------------------------
@@ -527,7 +559,7 @@ namespace FlyAI
             perchTimer -= dt;
             if (perchTimer > 0f) return;
 
-            if (Random.value < 0.35f || neighbours[spotIndex].Count == 0)
+            if (Random.value < 0.35f / restless || neighbours[spotIndex].Count == 0)
             {
                 // Turn in place and groom.
                 perchHeading = Quaternion.AngleAxis(Random.Range(-110f, 110f), perchNormal) * perchHeading;
@@ -609,7 +641,7 @@ namespace FlyAI
             var tangent = Vector3.ProjectOnPlane(direction, perchNormal);
             if (tangent.sqrMagnitude > 1e-6f) perchHeading = Vector3.RotateTowards(perchHeading, tangent.normalized, turnRate * dt, 0f);
             var facing = Mathf.Clamp01(Vector3.Dot(perchHeading, tangent.normalized) * 1.4f - 0.1f);
-            var speed = WalkSpeed * (fleeing ? 3.5f : 1f) * (0.6f + 0.4f * Mathf.PerlinNoise(Time.time * 1.5f, 4f)) * facing;
+            var speed = WalkSpeed * pace * (fleeing ? 3.5f : 1f) * (0.6f + 0.4f * Mathf.PerlinNoise(Time.time * 1.5f, 4f)) * facing;
             transform.position += direction * Mathf.Min(speed * dt, distance);
             Pose(perchNormal, perchHeading);
 
@@ -703,7 +735,7 @@ namespace FlyAI
             // Come in from above the landing spot.
             route.Add(ClampToAir(spots[chosen].position + Vector3.up * 0.9f));
 
-            BeginFlight(chosen, 2f + 3.5f * strength, 14f, true);
+            BeginFlight(chosen, (2f + 3.5f * strength) * pace, 14f, true);
             velocity = burst * flightSpeed * 0.7f;
         }
 
@@ -957,10 +989,16 @@ namespace FlyAI
 
         void OnGUI()
         {
+            if (MainMenu.Active) return;
             DrawMarker();
+            // The brain panel's toggle. Press Esc to free the mouse, then click it (J works any time).
+            var toggle = new Rect(Screen.width - 166f, 12f, 150f, 24f);
+            UiHit.Set("brain", toggle);
+            if (GUI.Button(toggle, showStatus ? "Fly brain  [hide]" : "Fly brain  [show]")) showStatus = !showStatus;
             if (!showStatus) return;
             if (statusStyle == null)
                 statusStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, richText = true, wordWrap = false, normal = { textColor = new Color(0.86f, 0.9f, 0.86f) } };
+                statusStyle.hover.textColor = statusStyle.active.textColor = statusStyle.focused.textColor = statusStyle.normal.textColor;
 
             var online = client != null && client.Connected;
             var info = string.IsNullOrEmpty(client?.BrainInfo) ? "connected" : client.BrainInfo;
@@ -984,13 +1022,14 @@ namespace FlyAI
                 $"Escape DNs     02: {Spike(spikes, 11)}/{Spike(spikes, 12)}   04: {Spike(spikes, 13)}/{Spike(spikes, 14)}   11: {Spike(spikes, 17)}/{Spike(spikes, 18)}",
                 "",
                 $"<b>Fly</b>         {state}   last action: {lastAction}",
-                "[J] hide",
+                $"<b>Personality</b>  {PersonalityName}",
+                "[J] or the button hides this",
             };
 
             const float lineHeight = 19f;
             var width = 470f;
             var height = lines.Length * lineHeight + 14f;
-            var panel = new Rect(Screen.width - width - 16f, 14f, width, height);
+            var panel = new Rect(Screen.width - width - 16f, 42f, width, height);
             var previous = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.62f);
             GUI.DrawTexture(panel, Texture2D.whiteTexture);

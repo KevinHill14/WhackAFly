@@ -5,6 +5,7 @@ namespace FlyAI
     [Serializable]
     public class LatestScan
     {
+        public string name;
         public string id;
         public string glb;
         public string room;

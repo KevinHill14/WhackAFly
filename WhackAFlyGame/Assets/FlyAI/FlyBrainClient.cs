@@ -19,6 +19,9 @@ namespace FlyAI
         public string mode;
         public string source;
         public int neurons;
+        public int[] active;          // Neurons that fired in this window (live brain only).
+        public int[] neuron_groups;   // Group index of every neuron, sent with the status.
+        public string[] group_names;
     }
 
     public struct BrainEscape
@@ -26,6 +29,7 @@ namespace FlyAI
         public float strength;
         public string side; // The direction the fly jumps, in the fly's own frame.
         public int[] spikes;
+        public int[] active;
     }
 
     // Talks to brain/server.py over a WebSocket: sends looming at 20 Hz, receives escape decisions.
@@ -37,6 +41,8 @@ namespace FlyAI
 
         public readonly string url;
         public volatile bool Connected;
+        public volatile int[] NeuronGroups;
+        public volatile string[] GroupNames;
         public volatile string BrainInfo = ""; // e.g. "live, 1602 neurons", from the server's status reply.
 
         readonly ConcurrentQueue<BrainEscape> escapes = new ConcurrentQueue<BrainEscape>();
@@ -152,9 +158,16 @@ namespace FlyAI
                 {
                     var message = JsonUtility.FromJson<BrainMessage>(json);
                     if (message != null && message.type == "status")
+                    {
                         BrainInfo = $"{message.source}, {message.neurons} neurons";
+                        if (message.neuron_groups != null && message.neuron_groups.Length > 0)
+                        {
+                            NeuronGroups = message.neuron_groups;
+                            GroupNames = message.group_names;
+                        }
+                    }
                     else if (message != null && message.type == "escape")
-                        escapes.Enqueue(new BrainEscape { strength = message.strength, side = message.side, spikes = message.spikes });
+                        escapes.Enqueue(new BrainEscape { strength = message.strength, side = message.side, spikes = message.spikes, active = message.active });
                 }
                 catch (Exception) { /* Ignore a malformed message. */ }
             }

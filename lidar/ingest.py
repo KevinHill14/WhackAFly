@@ -22,9 +22,10 @@ def new_scan_id():
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
 
 
-def publish(scan_id):
+def publish(scan_id, name=None):
     latest = {
         "id": scan_id,
+        "name": name or scan_id,
         "glb": f"scans/{scan_id}/scan.glb",
         "room": f"scans/{scan_id}/room.json",
         "updatedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -50,7 +51,7 @@ def ingest_file(path, ai=False):
         summary = process_scan(path, scan_dir, ai=ai)
         os.makedirs(UPLOADS, exist_ok=True)
         shutil.copyfile(path, copy_path)
-        publish(scan_id)
+        publish(scan_id, os.path.basename(path))
     except Exception:
         discard(copy_path, scan_dir)
         raise

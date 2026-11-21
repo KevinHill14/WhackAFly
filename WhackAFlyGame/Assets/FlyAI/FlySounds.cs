@@ -4,7 +4,8 @@ using UnityEngine;
 
 namespace FlyAI
 {
-    // Every game sound is generated here, so no audio files are needed.
+    // Every game sound is generated here, so no audio files are needed. A clip named after the sound in
+    // Resources/FlyAISfx (for example swing_whoosh.wav) overrides the generated one.
     public static class FlySounds
     {
         const int Rate = 22050;
@@ -17,12 +18,20 @@ namespace FlyAI
             "surge_whine", "light_buzz", "car_pass", "thunder", "footstep_0", "footstep_1", "footstep_2", "swing_whoosh",
             "impact_wood", "impact_wall", "impact_glass", "impact_ceramic", "impact_metal", "impact_tech", "impact_soft",
             "impact_squish", "window_smash", "fly_buzz",
+            "announce_3", "announce_2", "announce_1", "announce_smushed", "whistle", "round_won", "round_lost",
+            "announce_go", "fly_splat", "surge_slam", // only played when a recording exists in Resources/FlyAISfx
         };
 
         public static AudioClip Get(string name)
         {
             if (string.IsNullOrEmpty(name)) return null;
             if (Cache.TryGetValue(name, out var cached) && cached != null) return cached;
+            var recorded = Resources.Load<AudioClip>("FlyAISfx/" + name);
+            if (recorded != null)
+            {
+                Cache[name] = recorded;
+                return recorded;
+            }
             var samples = Synthesize(name);
             if (samples == null) return null;
             var clip = AudioClip.Create(name, samples.Length, 1, Rate, false);
@@ -66,6 +75,13 @@ namespace FlyAI
                 case "impact_squish": return Squish();
                 case "window_smash": return WindowSmash();
                 case "fly_buzz": return FlyBuzz();
+                case "announce_3": return Announcer("three");
+                case "announce_2": return Announcer("two");
+                case "announce_1": return Announcer("one");
+                case "announce_smushed": return Announcer("smushed");
+                case "whistle": return Whistle();
+                case "round_won": return RoundWon();
+                case "round_lost": return RoundLost();
                 default: return null;
             }
         }
@@ -301,6 +317,154 @@ namespace FlyAI
             }
             for (var i = 0; i < data.Length; i++) data[i] = (float)Math.Tanh(data[i] * 1.2f);
             return Normalize(data, 0.9f);
+        }
+
+        // --- Round sounds ---------------------------------------------------------------------------------
+        // The announcer is a small formant synthesiser (a buzzy voice through vowel filters), made to sound like a
+        // big-arena announcer. Real recordings can replace any of these: put a clip with the same name in
+        // Assets/FlyAI/Art/Resources/FlyAIVoices/ and it is used instead.
+
+        sealed class VoiceState
+        {
+            public float phase;
+            public float low;
+            public readonly float[] y1 = new float[3];
+            public readonly float[] y2 = new float[3];
+        }
+
+        static readonly float[] Fricative = { 5500f, 7000f, 8500f };
+        static readonly float[] Burst = { 1800f, 3200f, 4500f };
+
+        static void Phone(List<float> output, VoiceState v, System.Random random, float seconds, float pitchA, float pitchB,
+                          float voiced, float noise, float[] from, float[] to)
+        {
+            var count = Mathf.Max(1, Mathf.RoundToInt(seconds * Rate));
+            var bandwidth = new[] { 90f, 130f, 220f };
+            var weight = new[] { 1f, 0.55f, 0.28f };
+            for (var i = 0; i < count; i++)
+            {
+                var t = i / (float)Mathf.Max(1, count - 1);
+                v.phase += Mathf.Lerp(pitchA, pitchB, t) / Rate;
+                var pulse = 0f;
+                if (v.phase >= 1f)
+                {
+                    v.phase -= 1f;
+                    pulse = 1f;
+                }
+                var hiss = Noise(random);
+                var high = hiss - v.low;
+                v.low += (hiss - v.low) * 0.3f;
+                var excitation = pulse * voiced * 5f + high * noise;
+                var sample = 0f;
+                for (var k = 0; k < 3; k++)
+                {
+                    var frequency = Mathf.Lerp(from[k], to[k], t);
+                    var r = Mathf.Exp(-Mathf.PI * bandwidth[k] / Rate);
+                    var b1 = 2f * r * Mathf.Cos(2f * Mathf.PI * frequency / Rate);
+                    var y = (1f - r) * excitation + b1 * v.y1[k] - r * r * v.y2[k];
+                    v.y2[k] = v.y1[k];
+                    v.y1[k] = y;
+                    sample += y * weight[k];
+                }
+                output.Add(sample * Mathf.Clamp01(Mathf.Min(i, count - i) / (Rate * 0.012f)));
+            }
+        }
+
+        static float[] Announcer(string word)
+        {
+            var random = new System.Random(word.GetHashCode() & 0xffff);
+            var v = new VoiceState();
+            var o = new List<float>();
+            float[] F(float a, float b, float c) => new[] { a, b, c };
+            switch (word)
+            {
+                case "three":
+                    Phone(o, v, random, 0.08f, 125f, 125f, 0f, 0.9f, Fricative, Fricative);
+                    Phone(o, v, random, 0.09f, 135f, 128f, 1f, 0f, F(420f, 1300f, 1650f), F(290f, 2200f, 3000f));
+                    Phone(o, v, random, 0.36f, 128f, 100f, 1f, 0f, F(280f, 2250f, 3000f), F(280f, 2250f, 3000f));
+                    break;
+                case "two":
+                    Phone(o, v, random, 0.03f, 125f, 125f, 0f, 1.6f, Burst, Burst);
+                    Phone(o, v, random, 0.04f, 125f, 125f, 0.5f, 0f, F(310f, 900f, 2250f), F(310f, 900f, 2250f));
+                    Phone(o, v, random, 0.38f, 122f, 96f, 1f, 0f, F(310f, 900f, 2250f), F(300f, 850f, 2200f));
+                    break;
+                case "one":
+                    Phone(o, v, random, 0.07f, 122f, 122f, 1f, 0f, F(290f, 650f, 2150f), F(650f, 1200f, 2400f));
+                    Phone(o, v, random, 0.2f, 122f, 112f, 1f, 0f, F(650f, 1200f, 2400f), F(640f, 1180f, 2400f));
+                    Phone(o, v, random, 0.2f, 112f, 98f, 0.7f, 0f, F(250f, 1700f, 2600f), F(250f, 1700f, 2600f));
+                    break;
+                default: // smushed
+                    Phone(o, v, random, 0.12f, 120f, 120f, 0f, 1.3f, Fricative, Fricative);
+                    Phone(o, v, random, 0.07f, 125f, 125f, 0.6f, 0f, F(250f, 1100f, 2200f), F(250f, 1100f, 2200f));
+                    Phone(o, v, random, 0.17f, 125f, 112f, 1f, 0f, F(650f, 1200f, 2400f), F(640f, 1180f, 2400f));
+                    Phone(o, v, random, 0.14f, 112f, 105f, 0f, 1.2f, F(2800f, 4200f, 6000f), F(2800f, 4200f, 6000f));
+                    Phone(o, v, random, 0.03f, 105f, 105f, 0f, 1.6f, Burst, Burst);
+                    Phone(o, v, random, 0.05f, 105f, 105f, 0f, 0f, Burst, Burst);
+                    break;
+            }
+
+            // A bit of arena echo and grit, then level it.
+            var data = new float[o.Count + Rate / 3];
+            o.CopyTo(data);
+            var d1 = Mathf.RoundToInt(0.07f * Rate);
+            var d2 = Mathf.RoundToInt(0.15f * Rate);
+            for (var i = d2; i < data.Length; i++) data[i] += 0.3f * data[i - d1] + 0.18f * data[i - d2];
+            var peak = 0.0001f;
+            foreach (var x in data) peak = Mathf.Max(peak, Mathf.Abs(x));
+            for (var i = 0; i < data.Length; i++) data[i] = (float)System.Math.Tanh(data[i] / peak * 1.8f);
+            return Normalize(data, 0.85f);
+        }
+
+        // A referee's pea whistle: a high tone with a fast trill.
+        static float[] Whistle()
+        {
+            var data = New(0.85f);
+            var random = new System.Random(5);
+            var phase = 0f;
+            for (var i = 0; i < data.Length; i++)
+            {
+                var t = i / (float)Rate;
+                var frequency = 2900f + 70f * Mathf.Sin(2f * Mathf.PI * 7f * t);
+                phase += frequency / Rate;
+                var trill = 0.62f + 0.38f * Mathf.Sin(2f * Mathf.PI * 44f * t);
+                var tone = Mathf.Sin(2f * Mathf.PI * phase) + 0.3f * Mathf.Sin(4f * Mathf.PI * phase);
+                var envelope = Mathf.Clamp01(t / 0.015f) * Mathf.Clamp01((0.85f - t) / 0.2f);
+                data[i] = (tone * trill + Noise(random) * 0.18f) * envelope;
+            }
+            return Normalize(data, 0.8f);
+        }
+
+        static float[] RoundWon()
+        {
+            var data = New(1.5f);
+            var notes = new[] { 523.25f, 659.25f, 783.99f, 1046.5f };
+            for (var n = 0; n < notes.Length; n++)
+            {
+                var start = Mathf.RoundToInt(n * 0.13f * Rate);
+                for (var i = 0; start + i < data.Length; i++)
+                {
+                    var t = i / (float)Rate;
+                    data[start + i] += (Mathf.Sin(2f * Mathf.PI * notes[n] * t) + 0.35f * Mathf.Sin(4f * Mathf.PI * notes[n] * t)) * Mathf.Exp(-t * 3.2f) * Mathf.Clamp01(t / 0.005f);
+                }
+            }
+            return Normalize(data, 0.7f);
+        }
+
+        static float[] RoundLost()
+        {
+            var data = New(1.1f);
+            var tones = new[] { 392f, 311.13f, 233.08f };
+            for (var n = 0; n < tones.Length; n++)
+            {
+                var start = Mathf.RoundToInt(n * 0.28f * Rate);
+                for (var i = 0; start + i < data.Length && i < 0.5f * Rate; i++)
+                {
+                    var t = i / (float)Rate;
+                    var square = Mathf.Sign(Mathf.Sin(2f * Mathf.PI * tones[n] * t)) * 0.4f + Mathf.Sin(2f * Mathf.PI * tones[n] * t) * 0.4f;
+                    data[start + i] += square * Mathf.Exp(-t * 4f) * Mathf.Clamp01(t / 0.01f);
+                }
+            }
+            return Normalize(data, 0.6f);
         }
 
         // A loop of wing buzz: whole cycles per half-second so it repeats without a click.

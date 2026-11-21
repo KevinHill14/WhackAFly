@@ -12,8 +12,9 @@ Requires Unity `6000.0.85f2`. The project uses URP `17.0.4`, glTFast `6.21.0` an
 
 1. Open `WhackAFlyGame` in Unity Hub.
 2. Open `Assets/Scenes/SampleScene`.
-3. Make sure a scan exists (see `lidar.md`).
-4. Press Play.
+3. Press Play. The main menu starts the fly brain for you; choose a level there (see [The main menu](#the-main-menu)).
+
+To skip the menu and load the latest scan straight away (for quick tests), set `FLYAI_SKIP_MENU=1` before launching Unity. You then need to start `brain/server.py` yourself.
 
 No scene setup is needed. `RoomLoader` creates itself on Play in any scene, and creates the camera and player if needed.
 
@@ -93,11 +94,18 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | | `PropDamage` | Knock, wobble, shatter, squish; also holds lamp sway |
 | | `SwatMarks` | Free cosmetic swatter imprints, up to 512 per object |
 | Audio | `RoomAudio` | Positional sounds, room tone, rain |
-| | `FlySounds` | Generates every sound in code; no audio files |
+| | `FlySounds` | Generates every sound in code; a WAV in `Assets/FlyAI/Art/Resources/FlyAISfx/` named after the sound overrides it |
 | Player | `PlayerController` | Movement, aim, flashlight, swings, damage bill, HUD |
 | | `SwatterInput` | Keyboard/mouse input; a real swatter can implement `ISwatterInput` |
 | | `SwatterModel` | The swatter's 3D model |
+| | `MenuArt` | The menu's pictures, painted in code: the hallway, the person with the swatter, the fly icon |
+| | `ShaderWarmup` | Compiles a room's shaders in the background while the menu is up |
+| Menu | `MainMenu` | Title screen: brain status, level picker, phone upload with QR code, Play |
+| | `GameServices` | Starts and stops the brain server, upload server and scan ingest |
+| | `FilePicker` | System file window (editor and Windows) |
+| Round | `GameRound` | 3-2-1-HUNT countdown, 60 s timer, win and lose screens, SMUSHED, Play again button |
 | Fly | `FlyAgent` | Fly model, perching and hopping between landing spots, looming from the swatter, escape, swat kill |
+| | `NeuralView` | Bottom-right brain view: every neuron as a dot in a fly-head shape; firing neurons flash red |
 | | `FlyBrainClient` | WebSocket client for the brain server; auto-reconnects |
 | Tools | `FlyCamera` | Free debug camera and all debug keys |
 | | `Editor/FlyAITextureImport` | Keeps texture import settings correct |
@@ -113,6 +121,7 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | Mouse | Aim swatter and flashlight |
 | Left click | Swing; faster mouse movement means a stronger hit. Also recaptures the cursor |
 | `Q` | Flashlight on/off |
+| `X` | Show or hide the neural net view (bottom right). On by default |
 | Hold `Left Ctrl` | Sneak: 40% speed, near-silent footsteps, and the fly is much less likely to notice you |
 | `Space` tap | Ping: briefly clears the fog |
 | `Space` double tap | Turn 180 degrees |
@@ -138,6 +147,28 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | `H` | Trigger headlights |
 | `K` | Trigger lightning (needs a window) |
 | Hold `T` | Preview fly-nearby tension |
+
+## The main menu
+
+The game opens on a main menu. Nothing needs to be run by hand any more.
+
+- **Fly brain:** starts `brain/server.py` as soon as the game launches and stops it when the game closes. If a brain is already running on port 8765 it is used and left running. `FLYAI_BRAIN=ws://<pi-ip>:8765` uses a brain on another machine (the Pi) and starts nothing locally; `off` switches it off. The menu shows whether it is running.
+- **World button:** opens the file explorer at `data/uploads` (where phone uploads are kept). After you choose a `.zip` or `.glb`, it is processed (`lidar/ingest.py`) and the button shows the file's name.
+- **Upload from phone:** starts the upload server (`lidar/server.py`) and shows a QR code and link. The phone and the computer must be on the same Wi-Fi. When the upload finishes, the menu shows the file's name and it becomes the level. The page also shows which Wi-Fi network this computer is on (read from the system; no password is stored). "Return to main menu" is always there, so you can leave without uploading. After an upload, "Upload another" shows the QR code again. The upload server stops when you leave that screen or press Play.
+- **Background loading:** as soon as a level is selected, the game builds it behind the menu, frozen and silent. `ShaderWarmup` also draws every material in it once so its shaders compile now rather than as hitches during the round. The menu shows "Level ready" when it is done. Choosing another world cancels the one being processed or loaded and starts the new one.
+- **Play:** starts the round straight away if the level is ready, otherwise waits for it to finish. The result screen has a Main menu button to come back.
+
+The menu runs Python from the project's `.venv` (or `python` on the PATH), found by searching up from the game for the folder with `brain/` and `lidar/`. `FLYAI_ROOT` overrides that folder. A packaged build still needs that Python environment next to it.
+
+## The round
+
+Each room load starts a round: the countdown (3, 2, 1, whistle and HUNT) runs first with swings disabled and the fly not reacting. Then you have 60 seconds to smush the fly. A kill shows SMUSHED! and the win screen. If the time runs out, the lose screen shows. Both screens show the fly's personality, the damage bill and the number of swings, with a Play again button (or `R`) that loads a fresh round with a new fly.
+
+Each fly has a random personality (jittery or calm, restless or lazy, night owl or day flyer, speedy or slow). It only scales what the fly senses and how fast it moves, so the brain still decides every reaction. The announcer voice is generated in `FlySounds.cs`. Any recording in `Assets/FlyAI/Art/Resources/FlyAISfx/` named after a sound (`announce_3`, `announce_2`, `announce_1`, `announce_go`, `announce_smushed`, `swing_whoosh`, `impact_wall`, `fly_buzz`, `fly_splat`, `surge_slam` and so on) replaces the generated one; delete the file to get the generated one back. Originals are in `old sfx/`.
+
+The **neural net view** (button at the bottom right, or `X`) draws the 1,602 neurons the brain simulates as a fly's head: eyes on the sides hold the looming detectors, the middle holds the interneurons, and the descending neurons (including the Giant Fiber) run down the neck. Idle neurons are faint and clear; a neuron that fires flashes red and fades. The live brain reports exactly which neurons fired (`active` in each reply, and `neuron_groups` in the status). The lookup-table fallback only gives counts per group, so then that many neurons in each group flash.
+
+The fly brain panel has a `[hide]` / `[show]` button at the top right. Press `Esc` to free the mouse, then click it. `J` also toggles it at any time.
 
 ## Timed events
 
@@ -215,7 +246,7 @@ How it works: the brain controls the fly, and the game only supplies what the fl
 2. **Out:** the brain answers with an escape strength and a jump side.
    - Strength 0.4 or more: the fly takes off. The side sets its first turn, and the strength sets its speed and how many waypoints the flight has.
    - Strength 0.12 to 0.4: the fly walks away from the threat, toward the side the brain chose.
-3. **Game rules:** the fly only lands on furniture spots (table, seat, ledge, storage, bed, object), never the ceiling. It walks between neighbouring spots on a surface, perches, grooms, and flies routes through open air. A swing lands 0.12 s after it starts, so a quick escape dodges it.
+3. **Game rules:** the fly only lands on furniture spots (table, seat, ledge, storage, bed, object), never the ceiling. It walks between neighbouring spots on a surface, perches, grooms, and flies routes through open air. A swing hits instantly: the fly is smushed if it is inside the swatter's hit zone (the spot where the imprint lands, out to the swatter's reach), so it can only dodge before you swing.
 4. **No server, no reaction.** There is no stand-in. If the brain is off or disconnected the fly does not react, and the panel says so in red.
 5. **Raspberry Pi:** run `brain/server.py` on the Pi and set `FLYAI_BRAIN=ws://<pi-ip>:8765` before launching Unity.
 
@@ -243,7 +274,7 @@ Finding it: the buzz is loud in flight and muffled when the fly is behind you, s
 - Generated doors have no collider, so swings hit the wall behind them.
 - The swatter (reach, width and model) grows 10% of the original for every $1000 of damage, with no cap. `SwatterGrowthStep` in `PlayerController.cs` sets the step.
 - Every hit on an object is billed, so repeat swings add up. Imprints never add to the bill.
-- Standalone builds are untested. Shaders are looked up by name at runtime and may be stripped from a build.
+- Standalone builds are untested. The `FlyAI > Include game shaders in builds` editor step (it also runs automatically before each build) adds the shaders the game looks up by name to Always Included Shaders so they are not stripped.
 
 ## Troubleshooting
 
