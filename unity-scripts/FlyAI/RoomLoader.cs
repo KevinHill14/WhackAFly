@@ -436,6 +436,7 @@ namespace FlyAI
         {
             var player = PlayerController.GetOrCreate(GetCamera());
             player.Spawn(ToUnity(room.playerStart.position), YawToUnity(room.playerStart.yaw), RoomVisuals.Outline(room));
+            BackendClient.SendRoom(room, ToUnity(room.playerStart.position) + Vector3.up * 1.6f);
         }
 
         void OnDestroy() => currentImport?.Dispose();

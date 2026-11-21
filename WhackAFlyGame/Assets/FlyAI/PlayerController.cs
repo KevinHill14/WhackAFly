@@ -48,7 +48,7 @@ namespace FlyAI
         readonly Queue<(float time, Quaternion aim)> aimHistory = new Queue<(float, Quaternion)>();
         readonly RaycastHit[] hits = new RaycastHit[48];
 
-        ISwatterInput input = new KeyboardMouseSwatter();
+        ISwatterInput input = new NetSwatter(new KeyboardMouseSwatter());
         CharacterController body;
         Camera view;
         FlyCamera debugCamera;
@@ -216,6 +216,7 @@ namespace FlyAI
             }
             if (frame.swing && Time.time - swingStartedAt >= SwingCooldown) Swing(frame.swingStrength);
             AnimateSwatter();
+            BackendClient.SendPose(head.position, aimPivot.forward, swatReach);
         }
 
         // Rooms have one floor level, so the player never needs gravity. Long frames
@@ -309,6 +310,7 @@ namespace FlyAI
             swingStartedAt = Time.time;
             playerAudio.PlayOneShot(FlySounds.Get("swing_whoosh"), Mathf.Lerp(0.3f, 0.6f, strength));
             var direction = AimBeforeSwing() * Vector3.forward;
+            BackendClient.SendSwing(head.position, direction, strength, swatReach);
             var result = new SwingResult { time = Time.time, strength = strength, target = "nothing" };
 
             var count = Physics.SphereCastNonAlloc(head.position, swatRadius, direction, hits, swatReach, ~0, QueryTriggerInteraction.Ignore);

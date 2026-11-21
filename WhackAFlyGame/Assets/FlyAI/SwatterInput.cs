@@ -21,6 +21,29 @@ namespace FlyAI
         SwatterFrame Read();
     }
 
+    // Keyboard and mouse as before, plus swings from the real swatter. The ESP32 sends
+    // events to the backend over Wi-Fi and the backend forwards them to this client.
+    public class NetSwatter : ISwatterInput
+    {
+        const float MinRate = 4f;     // rad/s, same as SWING_THRESHOLD in the firmware
+        const float FullRate = 12f;   // rad/s that counts as a full-strength swing
+        readonly ISwatterInput fallback;
+
+        public NetSwatter(ISwatterInput fallback) => this.fallback = fallback;
+
+        public SwatterFrame Read()
+        {
+            var frame = fallback.Read();
+            while (BackendClient.TakeSwatterEvent(out var e))
+            {
+                if (e.evt != "swing") continue;
+                frame.swing = true;
+                frame.swingStrength = Mathf.Clamp01(Mathf.InverseLerp(MinRate * 0.5f, FullRate, e.rate));
+            }
+            return frame;
+        }
+    }
+
     // W/S walk, A/D turn, mouse aims, left click swings.
     // Space acts like the stick click: tap = ping, double tap = 180, hold = recenter.
     public class KeyboardMouseSwatter : ISwatterInput
