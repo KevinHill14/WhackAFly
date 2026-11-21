@@ -6,7 +6,8 @@ Usage:
     python generate_sfx.py glass_break  # (re)generate only the named clips
 
 Output: clips/<name>.wav (16-bit PCM, Unity imports it directly).
-Cost: measured at about 10-12 credits per second of audio on the Starter plan.
+Cost: sound effects ~10-12 credits per second of audio on the Starter plan;
+the spoken countdown is ~1 credit per character.
 
 The API key is never read here. It comes from the existing client module
 (elevenlabs_client.py, which loads ELEVENLABS_API_KEY from its .env.local).
@@ -46,6 +47,17 @@ EFFECTS = {
         duration=3.0, influence=0.8, loop=True),
 }
 
+# Announcer countdown, spoken with text-to-speech (a voice reads it better than
+# the sound-effects model). Played one per second: 3, 2, 1, GO.
+ANNOUNCER_VOICE = "pNInz6obpgDQGcFmaJgB"  # "Adam", deep firm premade voice
+VOICE_LINES = {
+    "countdown_3": "Three!",
+    "countdown_2": "Two!",
+    "countdown_1": "One!",
+    "countdown_go": "GO!",
+}
+COUNTDOWN_FULL = "countdown_full"  # the four lines stitched 1 s apart (no API cost)
+
 
 def load_client():
     sys.path.insert(0, CLIENT_DIR)
@@ -81,9 +93,40 @@ def generate(client, name, spec):
         suffix = ".mp3"
 
     audio = b"".join(client.text_to_sound_effects.convert(**kwargs))
+    return to_wav(audio, suffix, name, trim=not loop)
+
+
+def speak(client, name, line):
+    audio = b"".join(client.text_to_speech.convert(
+        voice_id=ANNOUNCER_VOICE,
+        text=line,
+        model_id="eleven_multilingual_v2",
+        output_format="mp3_44100_128",
+        voice_settings={"stability": 0.3, "similarity_boost": 0.8, "style": 0.8,
+                        "use_speaker_boost": True},
+    ))
+    return to_wav(audio, ".mp3", name, trim=True)
+
+
+def build_countdown_full():
+    """Stitch 3, 2, 1, GO into one clip, each line starting on a whole second."""
+    parts = [OUT_DIR / f"{n}.wav" for n in VOICE_LINES]
+    inputs = [arg for part in parts for arg in ("-i", str(part))]
+    delays = "".join(f"[{i}:a]adelay={i * 1000}:all=1[a{i}];" for i in range(len(parts)))
+    mix = "".join(f"[a{i}]" for i in range(len(parts)))
+    out = OUT_DIR / f"{COUNTDOWN_FULL}.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", *inputs, "-filter_complex",
+         f"{delays}{mix}amix=inputs={len(parts)}:normalize=0", "-c:a", "pcm_s16le", str(out)],
+        check=True)
+    return out
+
+
+def to_wav(audio, suffix, name, trim):
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(audio)
     out = OUT_DIR / f"{name}.wav"
+    loop = not trim
     try:
         gain = peak_gain_db(tmp.name)
         filters = f"volume={gain:.2f}dB"
@@ -107,24 +150,30 @@ def main():
 
     if shutil.which("ffmpeg") is None:
         sys.exit("ffmpeg not found on PATH")
-    unknown = [n for n in args.names if n not in EFFECTS]
+    known = {**EFFECTS, **VOICE_LINES}
+    unknown = [n for n in args.names if n not in known]
     if unknown:
-        sys.exit(f"unknown clip(s): {', '.join(unknown)}. Known: {', '.join(EFFECTS)}")
+        sys.exit(f"unknown clip(s): {', '.join(unknown)}. Known: {', '.join(known)}")
 
     OUT_DIR.mkdir(exist_ok=True)
     explicit = bool(args.names)
-    todo = [n for n in (args.names or EFFECTS)
+    todo = [n for n in (args.names or known)
             if explicit or args.force or not (OUT_DIR / f"{n}.wav").exists()]
-    if not todo:
+    full_missing = not (OUT_DIR / f"{COUNTDOWN_FULL}.wav").exists()
+    if not todo and not full_missing:
         print("All clips exist. Use --force to regenerate.")
         return
-    secs = sum(EFFECTS[n]["duration"] for n in todo)
-    print(f"Generating {len(todo)} clip(s), {secs:.1f}s total, ~{secs * 12:.0f} credits")
+    secs = sum(EFFECTS[n]["duration"] for n in todo if n in EFFECTS)
+    chars = sum(len(VOICE_LINES[n]) for n in todo if n in VOICE_LINES)
+    print(f"Generating {len(todo)} clip(s): ~{secs * 12 + chars:.0f} credits")
 
-    client = load_client()
+    client = load_client() if todo else None
     for n in todo:
         print(f"  {n} ...", end=" ", flush=True)
-        print(generate(client, n, EFFECTS[n]).name)
+        out = speak(client, n, VOICE_LINES[n]) if n in VOICE_LINES else generate(client, n, EFFECTS[n])
+        print(out.name)
+    if full_missing or any(n in VOICE_LINES for n in todo):
+        print(f"  {build_countdown_full().name} (stitched)")
 
 
 if __name__ == "__main__":
