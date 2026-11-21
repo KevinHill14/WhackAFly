@@ -3,3 +3,5 @@ numpy
 # Laptop-only, for rebuilding the subnetwork from the raw connectome:
 # pandas
 # pyarrow
+# Motion sensor bridge (firmware/imu_bridge.py)
+pyserial

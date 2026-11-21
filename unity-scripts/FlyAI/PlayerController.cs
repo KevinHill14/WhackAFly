@@ -56,6 +56,8 @@ namespace FlyAI
         public Light Flashlight { get; private set; }
         public Transform Head => head;
         public Transform SwatterTransform => swatter;
+        public ISwatterInput InputSource => input;
+        public void SetInput(ISwatterInput source) { if (source != null) input = source; }
         // Every $1000 of damage makes the swatter 10% bigger than the original: reach, width and the model.
         void UpdateSwatterSize(bool announce)
         {
@@ -253,7 +255,7 @@ namespace FlyAI
             }
 
             var frame = input.Read();
-            if (!captured)
+            if (!captured && !(input is ImuSwatter && !finished)) // The sensor does not need the mouse captured.
             {
                 frame.aimDelta = Vector2.zero;
                 frame.swing = false;

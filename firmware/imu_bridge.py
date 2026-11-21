@@ -1,0 +1,146 @@
+"""IMU bridge: reads the XIAO ESP32S3 + LSM6DSOX over USB serial and forwards it to Unity over UDP.
+
+Works with the existing firmware (env imu_test, firmware/src/main.cpp): it sends 'p' to switch on the raw stream,
+which prints  "lx:.. ly:.. lz:.. gx:.. gy:.. gz:.."  (linear acceleration in m/s^2 with gravity removed, gyro in
+rad/s with the start-up bias removed). The device must stay still for ~2 s after it is plugged in or reset.
+
+Every ~16 ms a UDP JSON packet goes to Unity (default 127.0.0.1:9100):
+    {"dg":[x,y,z],  rotation accumulated since the last packet, radians (device axes)
+     "g":[x,y,z],   latest gyro, rad/s
+     "l":[x,y,z],   latest linear acceleration, m/s^2
+     "lp":float,    PEAK |linear acceleration| since the last packet (so no swing is missed)
+     "n":int}       samples in this packet
+
+  python firmware/imu_bridge.py                 find the port, run, forward to Unity
+  python firmware/imu_bridge.py --port COM4
+  python firmware/imu_bridge.py --check         no Unity: print live values and SWING lines, to prove the sensor works
+  python firmware/imu_bridge.py --fake          no hardware: synthetic motion + a swing every 3 s (to test Unity)
+Close any other program using the serial port first (serial monitors, other bridges): only one can have it.
+"""
+import argparse
+import json
+import math
+import re
+import socket
+import sys
+import time
+
+PAIR = re.compile(r"(lx|ly|lz|gx|gy|gz):(-?[0-9.]+)")
+
+
+def find_port():
+    from serial.tools import list_ports
+    ports = list(list_ports.comports())
+    for p in ports:
+        text = f"{p.description} {p.manufacturer} {p.hwid}".lower()
+        if "303a" in text or "seeed" in text or "esp32" in text:   # Espressif USB VID
+            return p.device
+    return ports[0].device if ports else None
+
+
+def serial_samples(port):
+    import serial
+    s = serial.Serial(port, 115200, timeout=0.2)
+    time.sleep(1.0)
+    s.reset_input_buffer()
+    s.write(b"p")                      # toggle the raw stream on
+    last_p = time.time()
+    got = False
+    buf = b""
+    while True:
+        buf += s.read(512)
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            text = line.decode("ascii", "ignore")
+            kv = dict(PAIR.findall(text))
+            if len(kv) == 6:
+                got = True
+                yield [float(kv[k]) for k in ("lx", "ly", "lz", "gx", "gy", "gz")]
+            elif text.strip():
+                print("device:", text.strip())
+        if not got and time.time() - last_p > 3:   # still nothing: 'p' may have toggled it OFF
+            s.write(b"p")
+            last_p = time.time()
+
+
+def fake_samples():
+    t0 = time.time()
+    while True:
+        t = time.time() - t0
+        swing = (t % 3.0) < 0.15
+        lin = [25.0 if swing else 0.0, 0.0, 0.0]
+        gyro = [0.0, 0.8 * math.sin(t * 0.8), 0.6 * math.cos(t * 0.5)]
+        yield lin + gyro
+        time.sleep(0.005)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--udp-port", type=int, default=9100)
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--fake", action="store_true")
+    ap.add_argument("--swing-threshold", type=float, default=10.0, help="m/s^2, only used by --check")
+    args = ap.parse_args()
+
+    if args.fake:
+        source = fake_samples()
+    else:
+        port = args.port or find_port()
+        if not port:
+            sys.exit("no serial port found: plug the board in, or use --port")
+        print("reading", port)
+        try:
+            source = serial_samples(port)
+        except Exception as e:
+            sys.exit(f"could not open {port}: {e}\nIs another program (serial monitor, other bridge) using it?")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dest = (args.host, args.udp_port)
+    last = time.perf_counter()
+    last_send = last
+    dg = [0.0, 0.0, 0.0]
+    peak = 0.0
+    count = 0
+    swings = 0
+    swing_until = 0.0
+    total = 0
+    t_print = time.time()
+    print("running; Ctrl+C to stop")
+    try:
+        for lx, ly, lz, gx, gy, gz in source:
+            now = time.perf_counter()
+            dt = min(now - last, 0.1)
+            last = now
+            dg[0] += gx * dt
+            dg[1] += gy * dt
+            dg[2] += gz * dt
+            mag = math.sqrt(lx * lx + ly * ly + lz * lz)
+            peak = max(peak, mag)
+            count += 1
+            total += 1
+            if args.check:
+                if mag > args.swing_threshold and now > swing_until:
+                    swing_until = now + 0.4
+                    swings += 1
+                    print(f"SWING #{swings}  accel {mag:.1f} m/s^2")
+                if time.time() - t_print > 0.5:
+                    t_print = time.time()
+                    print(f"  gyro {gx:+.2f} {gy:+.2f} {gz:+.2f} rad/s   accel {mag:5.1f} m/s^2   samples {total}")
+            if now - last_send >= 1 / 60:
+                if not args.check:
+                    pkt = {"dg": dg, "g": [gx, gy, gz], "l": [lx, ly, lz], "lp": peak, "n": count}
+                    sock.sendto(json.dumps(pkt).encode(), dest)
+                last_send = now
+                dg = [0.0, 0.0, 0.0]
+                peak = 0.0
+                count = 0
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        sys.exit("serial port problem: %s\nIs another program (serial monitor, another bridge) using it? Only one can." % e)
+
+
+if __name__ == "__main__":
+    main()

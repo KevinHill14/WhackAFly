@@ -292,3 +292,13 @@ Finding it: the buzz is loud in flight and muffled when the fly is behind you, s
 | Player stuck | Press `R` to respawn, or `Tab` to inspect |
 | `L` says no AI layout | The scan needs both `room.ai.json` and `room.rules.json` |
 | Low frame rate | Press `F`, set `LampSway.MaxDegrees` to 0, or lower `MaxShadowLights` |
+
+## Motion sensor test (gyro + accelerometer)
+
+The XIAO ESP32S3 + LSM6DSOX (firmware branch, `firmware/src/main.cpp`, env `imu_test`) is read by `firmware/imu_bridge.py`, which sends UDP packets to Unity on port 9100. Close anything else using the serial port first (serial monitors, other bridges).
+
+1. Keep the board still for ~2 s after plugging it in (it calibrates the gyro).
+2. `python firmware/imu_bridge.py --check` (no Unity) prints live gyro/accel and a `SWING` line whenever acceleration passes the threshold. Use it to prove the sensor works.
+3. `python firmware/imu_bridge.py`, then start the game. A panel appears on the left once data arrives. Press **F10**: the swatter now aims with the gyro (rotation) and swings when acceleration passes the threshold (default 10 m/s², F11/F12 lower/raise it). Keys still walk.
+4. If an axis is wrong: F6/F7 choose which gyro axis is yaw/pitch, F8/F9 flip them.
+`--fake` sends synthetic motion for testing without the board. Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).
