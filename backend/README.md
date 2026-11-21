@@ -55,6 +55,10 @@ the classifier: `ThresholdClassifier` is a stand-in that applies the firmware's 
 (swing over 4 rad/s, push over 3 m/s2, with cooldowns). The trained model will implement the same
 two methods (`update`, `reset`), so nothing else changes when it replaces it.
 
+The trained model is in `swatter_ml/` (record, train, export: see `swatter_ml/README.md`). Start the
+backend with `--classifier model` (or `SWATTER_CLASSIFIER=model`) to use it; if it cannot load, the
+backend logs why and keeps the threshold rules.
+
 A watchdog reports the link: `never` (nothing has connected), `ok`, or `lost` (no samples for
 0.5 s). It appears in every `fly` message as `swatter`, in `stats`, and as a `swatter_link` event.
 When the link comes back the classifier restarts, since its gravity estimate is stale.

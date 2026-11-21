@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ws  # noqa: E402  (brain/ws.py, stdlib WebSocket)
 import qnx  # noqa: E402  (QNX scheduling, slog2 logging, timing)
-from gesture import ThresholdClassifier, parse_sample  # noqa: E402
+from gesture import ThresholdClassifier, make_classifier, parse_sample  # noqa: E402
 from game import FlyGame, TICK_HZ, SWAT_REACH  # noqa: E402
 
 LOOMING_HZ = 20
@@ -313,8 +314,13 @@ async def main():
     p.add_argument("--round-seconds", type=float, default=60.0, help="length of the hunt")
     p.add_argument("--countdown-seconds", type=float, default=3.0, help="length of the 3-2-1 countdown")
     p.add_argument("--rt-priority", type=int, default=20, help="QNX real-time priority, 0 to leave unchanged")
+    p.add_argument("--classifier", default=os.environ.get("SWATTER_CLASSIFIER", "threshold"),
+                   choices=["threshold", "model"], help="swing detection: firmware rules or the trained model")
+    p.add_argument("--model", default=os.environ.get("SWATTER_MODEL"), help="model folder (default swatter_ml/models/latest)")
     a = p.parse_args()
     b = Backend(a.brain, rounds=not a.practice, countdown_s=a.countdown_seconds, round_s=a.round_seconds)
+    b.classifier, why = make_classifier(a.classifier, a.model)
+    qnx.log(qnx.SLOG_WARNING if why else qnx.SLOG_NOTICE, why or f"swing classifier: {b.classifier.name}")
     b.qnx_info = qnx.startup(a.rt_priority)
     await ws.serve(b.on_client, a.host, a.port)
     await ws.serve(b.on_esp32, a.host, a.esp_port)
