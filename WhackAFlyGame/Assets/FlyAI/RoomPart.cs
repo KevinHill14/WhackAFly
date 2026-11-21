@@ -16,5 +16,8 @@ namespace FlyAI
     {
         public RoomPartKind kind;
         public string label;
+
+        // The visible mesh, when it differs from this collider's simple box.
+        public Transform visual;
     }
 }

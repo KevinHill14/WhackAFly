@@ -201,7 +201,7 @@ namespace FlyAI
             if (thunderAt > 0f && now >= thunderAt)
             {
                 thunderAt = -1f;
-                audioSource.PlayOneShot(FlySounds.Get("thunder"), 0.62f);
+                audioSource.PlayOneShot(FlySounds.Get("thunder"), 0.4f);
             }
         }
 
@@ -268,7 +268,7 @@ namespace FlyAI
         {
             if (headlight == null || surgeActive || Time.time - headlightStart < HeadlightDuration) return;
             headlightStart = Time.time;
-            if (carSource != null) carSource.PlayOneShot(FlySounds.Get("car_pass"), 0.75f);
+            if (carSource != null) carSource.PlayOneShot(FlySounds.Get("car_pass"), 0.42f);
         }
 
         void Update()

@@ -18,8 +18,10 @@ namespace FlyAI
 
     public static class RoomAudio
     {
-        const float RoomToneVolume = 0.13f;
-        const float RainVolume = 0.34f;
+        // Lower these to quiet the background further.
+        const float RoomToneVolume = 0.055f;
+        const float RainVolume = 0.07f;
+        const float SourceVolume = 0.45f;
 
         public static void AddEmitter(Transform parent, SoundAnchorData anchor)
         {
@@ -27,12 +29,13 @@ namespace FlyAI
             if (clip == null) return;
             var go = new GameObject($"Sound {anchor.sound}");
             go.transform.SetParent(parent, false);
-            var source = Spatial(go, clip, anchor.volume, Mathf.Max(anchor.range * 1.6f, 4f));
+            var volume = anchor.volume * SourceVolume;
+            var source = Spatial(go, clip, volume, Mathf.Max(anchor.range * 1.6f, 4f));
             source.time = Mathf.Abs(anchor.id.GetHashCode() % 1000) / 1000f * clip.length * 0.95f;
             source.Play();
             var powered = go.AddComponent<PoweredSound>();
             powered.source = source;
-            powered.baseVolume = anchor.volume;
+            powered.baseVolume = volume;
             powered.electric = anchor.sound == "fridge_hum" || anchor.sound == "tv_static" || anchor.sound == "radio_static"
                                || anchor.sound == "washer_rumble" || anchor.sound == "dishwasher_slosh" || anchor.sound == "oven_tick";
         }

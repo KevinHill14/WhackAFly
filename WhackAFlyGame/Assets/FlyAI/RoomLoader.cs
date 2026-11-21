@@ -205,6 +205,7 @@ namespace FlyAI
 
                 RoomVisuals.Apply(root.transform, mesh.transform, room, theme, camera);
                 BuildColliders(root.transform, room);
+                LinkVisuals(root.transform, mesh.transform);
                 var builtProps = RoomProps.Build(root.transform, room);
                 var boxes = BuildDebugBoxes(root.transform, room);
                 var markers = BuildMarkerSet(root.transform, room);
@@ -247,6 +248,17 @@ namespace FlyAI
                 import?.Dispose();
                 loading = false;
             }
+        }
+
+        // Lets swatter imprints land on the real mesh instead of its collider box.
+        static void LinkVisuals(Transform root, Transform meshRoot)
+        {
+            var nodes = new System.Collections.Generic.Dictionary<string, Transform>();
+            foreach (var node in meshRoot.GetComponentsInChildren<Transform>(true)) nodes.TryAdd(node.name, node);
+            foreach (var part in root.GetComponentsInChildren<RoomPart>(true))
+                if ((part.kind == RoomPartKind.Wall || part.kind == RoomPartKind.Furniture)
+                    && part.GetComponent<WindowBreak>() == null && nodes.TryGetValue(part.name, out var visual))
+                    part.visual = visual;
         }
 
         // Stops a bad room.json before it can disturb the room already running.

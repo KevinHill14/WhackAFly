@@ -81,7 +81,7 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | Look | `RoomTheme` | All colours and mood values |
 | | `RoomVisuals` | Materials, gap-closing shell, lights, post-processing |
 | | `RoomSurfaces` | Textures, generated UVs, baseboards, crown molding |
-| | `RoomWindow` | Generated window with night sky and rain |
+| | `RoomWindow` | Breakable window with night sky and rain |
 | | `RoomDoor` | Closed panel doors |
 | | `RoomWear` | Stains, scuffs, cobwebs |
 | Atmosphere | `RoomAtmosphere` | Fog, haze, dust, lamp flicker, ping |
@@ -90,7 +90,8 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | | `FlashlightFx` | Visible beam and occasional flicker |
 | Props | `RoomProps` | Builds props, sound props, wall decor |
 | | `PropMeshes` | Generated shapes (phone, fork, swatter parts) |
-| | `PropDamage` | Knock, wobble, shatter; also holds lamp sway |
+| | `PropDamage` | Knock, wobble, shatter, squish; also holds lamp sway |
+| | `SwatMarks` | Free cosmetic swatter imprints, up to 512 per object |
 | Audio | `RoomAudio` | Positional sounds, room tone, rain |
 | | `FlySounds` | Generates every sound in code; no audio files |
 | Player | `PlayerController` | Movement, aim, flashlight, swings, damage bill, HUD |
@@ -231,9 +232,9 @@ These hooks do not exist yet and will need small additions:
 - `L` swaps props, sounds and markers only. Lights stay from the layout that was loaded.
 - Landing spots do not update when props are knocked over or shattered.
 - Candles and scanned-window lights ignore blackouts and surges.
-- Only generated windows show sky and rain. A scanned window gets light, headlights and rain sound only.
-- Generated doors and windows have no collider, so swings hit the wall behind them.
-- Scanned furniture and walls are charged on every hit; props are charged once.
+- Only the room's main window can smash. Any other scanned window is a normal object.
+- Generated doors have no collider, so swings hit the wall behind them.
+- Every hit on an object is billed, so repeat swings add up. Imprints never add to the bill.
 - Standalone builds are untested. Shaders are looked up by name at runtime and may be stripped from a build.
 
 ## Troubleshooting

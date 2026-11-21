@@ -16,6 +16,7 @@ namespace FlyAI
             "dishwasher_slosh", "oven_tick", "fire_crackle", "toilet_drip", "wind_outside", "rain_outside",
             "surge_whine", "light_buzz", "car_pass", "thunder", "footstep_0", "footstep_1", "footstep_2", "swing_whoosh",
             "impact_wood", "impact_wall", "impact_glass", "impact_ceramic", "impact_metal", "impact_tech", "impact_soft",
+            "impact_squish", "window_smash",
         };
 
         public static AudioClip Get(string name)
@@ -62,6 +63,8 @@ namespace FlyAI
                 case "impact_metal": return Impact(0.55f, 720f, 8f, 0.18f, 16, 1f, 1.41f, 2.32f, 3.86f);
                 case "impact_tech": return Impact(0.22f, 420f, 34f, 0.55f, 17, 1f, 2.3f);
                 case "impact_soft": return Impact(0.17f, 110f, 34f, 0.3f, 18, 1f);
+                case "impact_squish": return Squish();
+                case "window_smash": return WindowSmash();
                 default: return null;
             }
         }
@@ -393,6 +396,47 @@ namespace FlyAI
                 data[i] = tone + Noise(random) * Mathf.Exp(-t * 110f) * noiseAmount;
             }
             return Normalize(data, 0.85f);
+        }
+
+        static float[] Squish()
+        {
+            var data = New(0.26f);
+            var random = new System.Random(171);
+            var low = 0f;
+            for (var i = 0; i < data.Length; i++)
+            {
+                var t = i / (float)Rate;
+                low += (Noise(random) - low) * Mathf.Lerp(0.5f, 0.06f, t / 0.26f);
+                data[i] = low * Mathf.Exp(-t * 17f) + Mathf.Sin(2f * Mathf.PI * (210f - t * 520f) * t) * Mathf.Exp(-t * 26f) * 0.75f;
+            }
+            return Normalize(data, 0.8f);
+        }
+
+        // A heavy impact, then a long spill of falling glass.
+        static float[] WindowSmash()
+        {
+            var data = New(1.7f);
+            var random = new System.Random(181);
+            for (var i = 0; i < data.Length; i++)
+            {
+                var t = i / (float)Rate;
+                data[i] = Mathf.Sin(2f * Mathf.PI * 74f * t) * Mathf.Exp(-t * 15f) * 1.1f + Noise(random) * Mathf.Exp(-t * 19f) * 1.15f;
+            }
+            for (var shard = 0; shard < 150; shard++)
+            {
+                var start = Mathf.RoundToInt(Mathf.Pow((float)random.NextDouble(), 1.7f) * 1.35f * Rate);
+                var frequency = Mathf.Lerp(1700f, 7600f, (float)random.NextDouble());
+                var amount = Mathf.Lerp(0.14f, 0.82f, (float)random.NextDouble()) * Mathf.Exp(-start / (float)Rate * 1.5f);
+                var decay = Mathf.Lerp(28f, 70f, (float)random.NextDouble());
+                for (var i = start; i < data.Length; i++)
+                {
+                    var t = (i - start) / (float)Rate;
+                    if (t > 0.17f) break;
+                    data[i] += Mathf.Sin(2f * Mathf.PI * frequency * t) * Mathf.Exp(-t * decay) * amount;
+                }
+            }
+            for (var i = 0; i < data.Length; i++) data[i] = (float)Math.Tanh(data[i] * 0.9f);
+            return Normalize(data, 0.95f);
         }
 
         static float[] Glass()

@@ -34,6 +34,7 @@ namespace FlyAI
         const float StepLength = 0.74f;
         const float HitStopSeconds = 0.055f;
         const float PopupSeconds = 1.1f;
+        const int WindowCost = 2500;
 
         public float walkSpeed = 2.2f;
         public float turnSpeed = 110f;
@@ -312,16 +313,39 @@ namespace FlyAI
 
             var count = Physics.SphereCastNonAlloc(head.position, swatRadius, direction, hits, swatReach, ~0, QueryTriggerInteraction.Ignore);
             var nearest = float.MaxValue;
+            var nearestBoundary = float.MaxValue;
             RoomPart part = null;
+            RoomPart boundary = null;
+            var hitNormal = -direction;
+            var boundaryPoint = Vector3.zero;
+            var boundaryNormal = -direction;
             for (var i = 0; i < count; i++)
             {
                 var candidate = hits[i];
-                if (candidate.collider == body || candidate.distance <= 0f || candidate.distance >= nearest) continue;
+                if (candidate.collider == body || candidate.distance <= 0f) continue;
                 var roomPart = candidate.collider.GetComponent<RoomPart>();
-                if (roomPart == null || roomPart.kind == RoomPartKind.Boundary) continue;
+                if (roomPart == null) continue;
+                if (roomPart.kind == RoomPartKind.Boundary)
+                {
+                    if (candidate.distance >= nearestBoundary) continue;
+                    nearestBoundary = candidate.distance;
+                    boundary = roomPart;
+                    boundaryPoint = candidate.point;
+                    boundaryNormal = candidate.normal;
+                    continue;
+                }
+                if (candidate.distance >= nearest) continue;
                 nearest = candidate.distance;
                 part = roomPart;
                 result.point = candidate.point;
+                hitNormal = candidate.normal;
+            }
+            if (part == null && boundary != null)
+            {
+                // Gaps in a scan's walls are still solid, so they can take a mark.
+                part = boundary;
+                result.point = boundaryPoint;
+                hitNormal = boundaryNormal;
             }
 
             if (part != null)
@@ -329,16 +353,24 @@ namespace FlyAI
                 result.hit = true;
                 result.kind = part.kind;
                 result.target = part.label;
+                var window = part.GetComponent<WindowBreak>();
                 var prop = part.GetComponent<PropDamage>();
-                var charged = prop == null || prop.Hit(result.point, direction, strength);
-                result.damage = charged ? Mathf.RoundToInt(DamageCost(part) * strength) : 0;
+                if (window != null) window.Smash(strength);
+                else SwatMarks.Stamp(part, head.position, direction, result.point, hitNormal, view.transform.up, swatReach);
+                if (prop != null) prop.Hit(result.point, direction, strength);
+                PropDamage.ShakeNearby(result.point, strength, prop);
+
+                // Every object is billed once. Imprints stay free and unlimited.
+                var cost = window != null ? WindowCost : Mathf.RoundToInt(DamageCost(part) * strength);
+                result.damage = cost;
                 DamageBill += result.damage;
                 message = result.damage > 0 ? $"Hit {part.label}: -${result.damage}" : $"Hit {part.label}";
                 if (result.damage > 0)
                     popups.Add(new DamagePopup { point = result.point, text = $"-${result.damage}", born = Time.unscaledTime });
 
-                playerAudio.PlayOneShot(FlySounds.Get(prop != null ? prop.ImpactSound : ImpactFor(part)), Mathf.Lerp(0.5f, 0.95f, strength));
-                shake = Mathf.Lerp(0.55f, 1f, strength);
+                var impact = window != null ? "window_smash" : prop != null ? prop.ImpactSound : ImpactFor(part);
+                playerAudio.PlayOneShot(FlySounds.Get(impact), window != null ? 1f : Mathf.Lerp(0.5f, 0.95f, strength));
+                shake = window != null ? 1.25f : Mathf.Lerp(0.55f, 1f, strength);
                 if (hitStop != null) StopCoroutine(hitStop);
                 hitStop = StartCoroutine(HitStop());
             }
@@ -362,6 +394,7 @@ namespace FlyAI
             switch (part.kind)
             {
                 case RoomPartKind.Wall:
+                case RoomPartKind.Boundary:
                 case RoomPartKind.Ceiling: return "impact_wall";
                 case RoomPartKind.Floor: return "impact_wood";
             }

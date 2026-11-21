@@ -15,9 +15,54 @@ namespace FlyAI
         }
     }
 
+    // Smashes once: the panes and bars go, leaving jagged glass in the frame.
+    public class WindowBreak : MonoBehaviour
+    {
+        const int ShardCount = 34;
+
+        GameObject bars;
+        Material brokenGlass;
+        Material shardGlass;
+        float width;
+        float height;
+        bool broken;
+
+        public void Setup(GameObject windowBars, Material jaggedGlass, Material shards, float windowWidth, float windowHeight)
+        {
+            bars = windowBars;
+            brokenGlass = jaggedGlass;
+            shardGlass = shards;
+            width = windowWidth;
+            height = windowHeight;
+        }
+
+        public void Smash(float strength)
+        {
+            if (broken) return;
+            broken = true;
+            bars.SetActive(false);
+            GetComponent<Collider>().enabled = false;
+            RoomWindow.Pane(transform, 0.02f, width, height, brokenGlass);
+
+            for (var i = 0; i < ShardCount; i++)
+            {
+                var local = new Vector3(Random.Range(-width, width) * 0.47f, Random.Range(-height, height) * 0.47f, 0.05f);
+                var velocity = transform.forward * Random.Range(0.5f, 2.6f) * Mathf.Lerp(0.7f, 1.2f, strength)
+                               + Random.insideUnitSphere * 0.9f + Vector3.up * Random.Range(0f, 1.1f);
+                ShardFx.Spawn(transform, transform.TransformPoint(local), Random.Range(0.035f, 0.1f), shardGlass, velocity, 0.08f);
+            }
+
+            // With the glass gone, the rain outside is louder.
+            var rain = GameObject.Find("Rain Outside");
+            if (rain != null && rain.TryGetComponent<AudioSource>(out var rainSource)) rainSource.volume *= 2.2f;
+        }
+    }
+
     // Builds a framed window with a rainy night outside, from the size calculated for this room.
     public static class RoomWindow
     {
+        const float ScannedWindowOffset = 0.07f;
+
         public static bool IsValid(WindowData window) =>
             window != null && window.center != null && window.center.Length == 3
             && window.normal != null && window.normal.Length == 3 && window.width > 0f && window.height > 0f;
@@ -28,11 +73,14 @@ namespace FlyAI
         public static Material Build(Transform parent, RoomData room, RoomTheme theme, RoomAssets assets)
         {
             var data = room.window;
-            if (!IsValid(data) || data.source != "generated") return null;
+            if (!IsValid(data)) return null;
 
-            var holder = new GameObject("Generated Window").transform;
+            var holder = new GameObject("Room Window").transform;
             holder.SetParent(parent, false);
-            holder.SetPositionAndRotation(RoomLoader.ToUnity(data.center), Quaternion.LookRotation(RoomLoader.ToUnity(data.normal)));
+            var facing = RoomLoader.ToUnity(data.normal);
+            // A scanned window's centre is inside the wall, so bring it out to the wall's face.
+            var position = RoomLoader.ToUnity(data.center) + (data.source == "generated" ? Vector3.zero : facing * ScannedWindowOffset);
+            holder.SetPositionAndRotation(position, Quaternion.LookRotation(facing));
 
             var frame = assets.Keep(RoomVisuals.LitMaterial(theme.trim, 0.34f));
             var seed = Mathf.RoundToInt(data.center[0] * 97f + data.center[2] * 61f);
@@ -59,17 +107,58 @@ namespace FlyAI
             Part(holder, new Vector3(-w / 2f, 0f, depth / 2f), new Vector3(bar, h + bar, depth), frame);
             Part(holder, new Vector3(w / 2f, 0f, depth / 2f), new Vector3(bar, h + bar, depth), frame);
 
+            var bars = new GameObject("Window Bars").transform;
+            bars.SetParent(holder, false);
             var columns = PaneColumns(w);
             for (var i = 1; i < columns; i++)
-                Part(holder, new Vector3(-w / 2f + w * i / columns, 0f, depth * 0.4f), new Vector3(bar * 0.55f, h, depth * 0.7f), frame);
-            Part(holder, new Vector3(0f, 0f, depth * 0.4f), new Vector3(w, bar * 0.55f, depth * 0.7f), frame);
+                Part(bars, new Vector3(-w / 2f + w * i / columns, 0f, depth * 0.4f), new Vector3(bar * 0.55f, h, depth * 0.7f), frame);
+            Part(bars, new Vector3(0f, 0f, depth * 0.4f), new Vector3(w, bar * 0.55f, depth * 0.7f), frame);
 
             var sillDepth = Mathf.Clamp(w * 0.09f, 0.09f, 0.16f);
             Part(holder, new Vector3(0f, -h / 2f - bar * 0.7f, sillDepth / 2f), new Vector3(w + bar * 3f, bar * 0.75f, sillDepth), frame);
+
+            var jagged = RoomProps.ClearSurface(new Color(0.62f, 0.72f, 0.82f, 0.62f), assets);
+            jagged.SetFloat("_Cull", (float)CullMode.Off);
+            jagged.SetTexture("_BaseMap", assets.Keep(CreateBrokenGlass(seed)));
+            var shards = RoomProps.ClearSurface(new Color(0.72f, 0.82f, 0.9f, 0.58f), assets);
+            var hitBox = holder.gameObject.AddComponent<BoxCollider>();
+            hitBox.center = new Vector3(0f, 0f, 0.06f);
+            hitBox.size = new Vector3(w + bar, h + bar, 0.12f);
+            var part = holder.gameObject.AddComponent<RoomPart>();
+            part.kind = RoomPartKind.Furniture;
+            part.label = "window";
+            holder.gameObject.AddComponent<WindowBreak>().Setup(bars.gameObject, jagged, shards, w, h);
             return sky;
         }
 
-        static void Pane(Transform parent, float z, float width, float height, Material material)
+        // Clear in the middle, with sharp glass teeth left around the frame.
+        static Texture2D CreateBrokenGlass(int seed)
+        {
+            const int size = 256;
+            var random = new System.Random(seed + 19);
+            var teeth = new float[28];
+            for (var i = 0; i < teeth.Length; i++) teeth[i] = Mathf.Lerp(0.42f, 0.92f, (float)random.NextDouble());
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, true) { wrapMode = TextureWrapMode.Clamp, name = "Broken Glass" };
+            var pixels = new Color32[size * size];
+            for (var y = 0; y < size; y++)
+                for (var x = 0; x < size; x++)
+                {
+                    var u = x / (size - 1f) * 2f - 1f;
+                    var v = y / (size - 1f) * 2f - 1f;
+                    var angle = Mathf.Repeat(Mathf.Atan2(v, u) / (Mathf.PI * 2f), 1f) * teeth.Length;
+                    var index = Mathf.FloorToInt(angle) % teeth.Length;
+                    var along = angle - Mathf.Floor(angle);
+                    var limit = Mathf.Lerp(teeth[index], teeth[(index + 1) % teeth.Length], along);
+                    var reach = Mathf.Max(Mathf.Abs(u), Mathf.Abs(v));
+                    var alpha = reach > limit ? 0.5f + (reach - limit) * 0.7f : 0f;
+                    pixels[y * size + x] = new Color32(255, 255, 255, (byte)(Mathf.Clamp01(alpha) * 255f));
+                }
+            texture.SetPixels32(pixels);
+            texture.Apply(true, true);
+            return texture;
+        }
+
+        internal static void Pane(Transform parent, float z, float width, float height, Material material)
         {
             var pane = GameObject.CreatePrimitive(PrimitiveType.Quad);
             Object.DestroyImmediate(pane.GetComponent<Collider>());
