@@ -16,12 +16,19 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebSocketsClient.h>
 #include <Wire.h>
 #include <Adafruit_LSM6DSOX.h>
 
 // ---- WiFi (phone hotspot) ---------------------------------------------------
 constexpr char WIFI_SSID[] = "SM-G781W0986";
 constexpr char WIFI_PASSWORD[] = "blwt3316";
+// -----------------------------------------------------------------------------
+
+// ---- WebSocket (Raspberry Pi training-data server) --------------------------
+constexpr char PI_HOST[] = "172.20.10.10";
+constexpr uint16_t PI_PORT = 8765;
+constexpr char PI_WS_PATH[] = "/";
 // -----------------------------------------------------------------------------
 
 // ---- Tunables ---------------------------------------------------------------
@@ -34,6 +41,7 @@ constexpr uint32_t LOOP_PERIOD_MS = 5;    // ~200 Hz
 // -----------------------------------------------------------------------------
 
 Adafruit_LSM6DSOX imu;
+WebSocketsClient webSocket;
 
 float gravity[3] = {0, 0, 0};   // slowly-tracked gravity vector (device frame)
 float gyroBias[3] = {0, 0, 0};  // rad/s, measured while still
@@ -85,6 +93,22 @@ static int dominantAxis(const float v[3]) {
   return best;
 }
 
+static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      Serial.println("WebSocket connected to Pi server.");
+      break;
+    case WStype_DISCONNECTED:
+      Serial.println("WebSocket disconnected from Pi server.");
+      break;
+    case WStype_ERROR:
+      Serial.println("WebSocket error.");
+      break;
+    default:
+      break;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   uint32_t start = millis();
@@ -99,6 +123,10 @@ void setup() {
     Serial.print(".");
   }
   Serial.printf("\nWiFi connected, IP address: %s\n", WiFi.localIP().toString().c_str());
+
+  webSocket.begin(PI_HOST, PI_PORT, PI_WS_PATH);
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(2000);
 
   Wire.begin();  // XIAO ESP32S3 default: SDA=GPIO5 (D4), SCL=GPIO6 (D5)
   Wire.setClock(400000);
@@ -121,6 +149,8 @@ void setup() {
 void loop() {
   static uint32_t lastLoop = 0;
   uint32_t now = millis();
+  webSocket.loop();
+
   if (now - lastLoop < LOOP_PERIOD_MS) return;
   lastLoop = now;
 
@@ -148,6 +178,13 @@ void loop() {
     Serial.printf("lx:%.2f ly:%.2f lz:%.2f gx:%.2f gy:%.2f gz:%.2f\n",
                   linear[0], linear[1], linear[2], gyro[0], gyro[1], gyro[2]);
   }
+
+  // Stream every sample to the Pi for training-data collection.
+  char json[160];
+  snprintf(json, sizeof(json),
+           "{\"t\":%lu,\"ax\":%.4f,\"ay\":%.4f,\"az\":%.4f,\"gx\":%.4f,\"gy\":%.4f,\"gz\":%.4f}",
+           (unsigned long)now, accel[0], accel[1], accel[2], gyro[0], gyro[1], gyro[2]);
+  webSocket.sendTXT(json);
 
   // Swing: strong rotation about one axis. Checked first, because swinging
   // also produces linear acceleration and we don't want a swing to read as a push.
