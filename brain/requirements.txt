@@ -1,0 +1,5 @@
+# Server / Pi: only NumPy (the server also runs without it, on the fallback table)
+numpy
+# Laptop-only, for rebuilding the subnetwork from the raw connectome:
+# pandas
+# pyarrow

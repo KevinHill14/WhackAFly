@@ -1,0 +1,19 @@
+{
+  "max_rate_hz": 15,
+  "full_drive": 4.712,
+  "eye_gain": {
+    "left": 1.0,
+    "right": 0.78
+  },
+  "gf_spikes_per_window": {
+    "left": [
+      1.37,
+      1.27
+    ],
+    "right": [
+      1.5,
+      1.9
+    ]
+  },
+  "rule": "max rate with GF <= 3.0 and DN <= 8.0 spikes/50ms at full looming"
+}

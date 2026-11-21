@@ -116,3 +116,6 @@ neurons.tsv
 
 # Claude Code local state
 .claude/
+
+# Fly brain: raw connectome data (~135 MB, fetch with brain/get_data.sh)
+brain/data/
