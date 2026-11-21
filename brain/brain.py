@@ -1,5 +1,6 @@
 """The fly's escape reflex: a leaky integrate-and-fire simulation of the
-LPLC2/LC4 -> DNp01 (Giant Fiber) subnetwork of the FlyWire v783 connectome.
+LPLC2/LC4 (vision) + JO-A/JO-B (sound) -> DNp01 (Giant Fiber) subnetwork of
+the FlyWire v783 connectome.
 
 NumPy only, so it runs on the QNX Raspberry Pi. Constants follow Shiu et al.
 2024 (model.py in philshiu/Drosophila_brain_model):
@@ -61,10 +62,20 @@ class FlyBrain:
         w = np.zeros((n, n), dtype=np.float32)
         np.add.at(w, (s["pre"], s["post"]), s["weight"].astype(np.float32) * W_SYN)
         self.w = w
+        # Neurons with no outgoing connection inside the subnetwork (e.g. most
+        # JO neurons: their synapses are below threshold). Skipping their
+        # all-zero rows when spikes are propagated changes nothing but time.
+        self.has_out = (w != 0).any(axis=1)
 
-        inp = np.where(role == "input")[0]
+        # Older subnet files have no "sense" array: every input is an eye.
+        sense = s["sense"] if "sense" in s.files else np.where(role == "input", "vision", "")
+        inp = np.where((role == "input") & (sense == "vision"))[0]
         self.inputs_left = inp[self.side[inp] == "left"]
         self.inputs_right = inp[self.side[inp] == "right"]
+        ear = np.where((role == "input") & (sense == "sound"))[0]
+        self.ears = {"left": ear[self.side[ear] == "left"],
+                     "right": ear[self.side[ear] == "right"]}
+        self.has_sound = len(ear) > 0
         self.is_input = role == "input"
 
         def one(name):
@@ -85,6 +96,10 @@ class FlyBrain:
         # The right-eye pathway in this connectome is ~2x stronger than the
         # left; a per-eye input gain equalises full-looming drive.
         self.eye_gain = dict(calib.get("eye_gain", {"left": 1.0, "right": 1.0}))
+        # Sound: JO rate at sound = 1, and a per-ear gain (the right ear's
+        # pathway is stronger, like the right eye's). Set by calibrate.py.
+        self.sound_rate_hz = float(calib.get("sound_rate_hz", 0.0))
+        self.ear_gain = dict(calib.get("ear_gain", {"left": 1.0, "right": 1.0}))
         self.rng = np.random.default_rng(seed)
         self.steps = int(round(DECISION_MS / DT))
         self.delay = int(round(T_DLY / DT))
@@ -105,8 +120,9 @@ class FlyBrain:
         self.drive_ema = 0.0
         self.jump = "left" if self.rng.random() < 0.5 else "right"
 
-    def _drive(self, value, side):
-        """Looming -> Poisson rate per input neuron, one eye at a time."""
+    def _drive(self, value, side, sound=0.0, sound_side="center"):
+        """Looming -> Poisson rate of that eye's LPLC2/LC4; sound -> Poisson
+        rate of that ear's JO neurons ("center" = both). Both can be on."""
         value = float(min(max(value, 0.0), 1.0))
         rate = np.zeros(self.n, dtype=np.float32)
         r = value * self.max_rate_hz
@@ -114,11 +130,17 @@ class FlyBrain:
             rate[self.inputs_left] = r * self.eye_gain["left"]
         if side in ("right", "center"):
             rate[self.inputs_right] = r * self.eye_gain["right"]
+        sound = float(min(max(sound, 0.0), 1.0))
+        if sound > 0 and self.has_sound:
+            rs = sound * self.sound_rate_hz
+            for ear in ("left", "right"):
+                if sound_side in (ear, "center"):
+                    rate[self.ears[ear]] = rs * self.ear_gain[ear]
         return rate
 
-    def run(self, value, side="center"):
+    def run(self, value, side="center", sound=0.0, sound_side="center"):
         """Simulate one decision window. Returns per-neuron spike counts."""
-        rate = self._drive(value, side)
+        rate = self._drive(value, side, sound, sound_side)
         p = rate * np.float32(DT / 1000.0)
         active = np.where(p > 0)[0]
         kicks = None
@@ -131,7 +153,7 @@ class FlyBrain:
         v, g, refr, w, pending = self.v, self.g, self.refr, self.w, self.pending
         tmp = np.empty_like(v)
         counts = np.zeros(self.n, dtype=np.int32)
-        is_input = self.is_input
+        is_input, has_out = self.is_input, self.has_out
         a_v = np.float32(1.0) - self.k_v             # v <- a_v*v + k_v*(V_0 + g)
         k_v, v0k, decay = self.k_v, np.float32(V_0) * self.k_v, self.decay_g
         rfc = self.rfc_steps
@@ -170,16 +192,18 @@ class FlyBrain:
                 refr[spk] = np.where(is_input[spk], 0, rfc)
                 counts[spk] += 1
                 # Arrives T_DLY later: that slot is the one we just cleared.
-                pending[slot] += w[spk].sum(axis=0)
+                src = spk[has_out[spk]]
+                if len(src):
+                    pending[slot] += w[src].sum(axis=0)
                 ref = np.flatnonzero(refr > 0)
             elif len(ref) and refr[ref].min() <= 0:
                 ref = ref[refr[ref] > 0]
             self.t += 1
         return counts
 
-    def decide(self, value, side="center"):
-        """One looming message in -> one escape decision out."""
-        counts = self.run(value, side)
+    def decide(self, value, side="center", sound=0.0, sound_side="center"):
+        """One 50 ms window of looming and/or sound in -> one escape decision out."""
+        counts = self.run(value, side, sound, sound_side)
         g = np.bincount(self.group_id, weights=counts,
                         minlength=self.n_groups).astype(int)
         name = self.group_names.index
@@ -199,6 +223,8 @@ class FlyBrain:
         # DNp02/04/11 fire only for looming on their own side, at every level
         # and threshold we tested, so they vote. (DNp06 flips laterality with
         # input rate, so it's left out.) The fly jumps AWAY from the threat.
+        # Sound uses the same vote: the ears' direct JO -> DN synapses are
+        # strictly same-side, so a sound on the left drives the left DNs.
         # A tie (e.g. no spikes) keeps the previous choice.
         left_threat = sum(g[name(f"{t}_L")] for t in IPSI_DNS)
         right_threat = sum(g[name(f"{t}_R")] for t in IPSI_DNS)

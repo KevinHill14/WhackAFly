@@ -15,5 +15,30 @@
       1.9
     ]
   },
-  "rule": "max rate with GF <= 3.0 and DN <= 8.0 spikes/50ms at full looming"
+  "rule": "max rate with GF <= 3.0 and DN <= 8.0 spikes/50ms at full looming",
+  "sound_rate_hz": 167.7,
+  "ear_gain": {
+    "right": 1.0,
+    "left": 13.74
+  },
+  "sound_strength_full": {
+    "left": 0.748,
+    "right": 0.776
+  },
+  "sound_gf_spikes_per_window": {
+    "left": [
+      0.0,
+      0.03
+    ],
+    "right": [
+      0.0,
+      3.1
+    ]
+  },
+  "sound_jump_away": {
+    "left": 1.0,
+    "right": 1.0
+  },
+  "sound_ears_matched": true,
+  "sound_rule": "stronger ear: max rate (<= 400 Hz) with one-ear full-sound drive <= one-eye full-looming drive and GF <= 3.0, DN <= 8.0; weaker ear gain (<= 30) to match"
 }
