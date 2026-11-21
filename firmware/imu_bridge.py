@@ -14,7 +14,6 @@ Every ~16 ms a UDP JSON packet goes to Unity (default 127.0.0.1:9100):
   python firmware/imu_bridge.py                 find the port, run, forward to Unity
   python firmware/imu_bridge.py --port COM4
   python firmware/imu_bridge.py --check         no Unity: print live values and SWING lines, to prove the sensor works
-  python firmware/imu_bridge.py --fake          no hardware: synthetic motion + a swing every 3 s (to test Unity)
 Close any other program using the serial port first (serial monitors, other bridges): only one can have it.
 """
 import argparse
@@ -63,38 +62,20 @@ def serial_samples(port):
             last_p = time.time()
 
 
-def fake_samples():
-    t0 = time.time()
-    while True:
-        t = time.time() - t0
-        swing = (t % 3.0) < 0.15
-        lin = [25.0 if swing else 0.0, 0.0, 0.0]
-        gyro = [0.0, 0.8 * math.sin(t * 0.8), 0.6 * math.cos(t * 0.5)]
-        yield lin + gyro
-        time.sleep(0.005)
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=9100)
     ap.add_argument("--check", action="store_true")
-    ap.add_argument("--fake", action="store_true")
     ap.add_argument("--swing-threshold", type=float, default=10.0, help="m/s^2, only used by --check")
     args = ap.parse_args()
 
-    if args.fake:
-        source = fake_samples()
-    else:
-        port = args.port or find_port()
-        if not port:
-            sys.exit("no serial port found: plug the board in, or use --port")
-        print("reading", port)
-        try:
-            source = serial_samples(port)
-        except Exception as e:
-            sys.exit(f"could not open {port}: {e}\nIs another program (serial monitor, other bridge) using it?")
+    port = args.port or find_port()
+    if not port:
+        sys.exit("no serial port found: plug the board in, or use --port")
+    print("reading", port)
+    source = serial_samples(port)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dest = (args.host, args.udp_port)

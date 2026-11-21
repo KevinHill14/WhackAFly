@@ -301,4 +301,4 @@ The XIAO ESP32S3 + LSM6DSOX (firmware branch, `firmware/src/main.cpp`, env `imu_
 2. `python firmware/imu_bridge.py --check` (no Unity) prints live gyro/accel and a `SWING` line whenever acceleration passes the threshold. Use it to prove the sensor works.
 3. `python firmware/imu_bridge.py`, then start the game. A panel appears on the left once data arrives. Press **F10**: the swatter now aims with the gyro (rotation) and swings when acceleration passes the threshold (default 10 m/s², F11/F12 lower/raise it). Keys still walk.
 4. If an axis is wrong: F6/F7 choose which gyro axis is yaw/pitch, F8/F9 flip them.
-`--fake` sends synthetic motion for testing without the board. Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).
+Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).
