@@ -15,8 +15,14 @@
 // and Adafruit Unified Sensor.
 
 #include <Arduino.h>
+#include <WiFi.h>
 #include <Wire.h>
 #include <Adafruit_LSM6DSOX.h>
+
+// ---- WiFi (phone hotspot) ---------------------------------------------------
+constexpr char WIFI_SSID[] = "SM-G781W0986";
+constexpr char WIFI_PASSWORD[] = "blwt3316";
+// -----------------------------------------------------------------------------
 
 // ---- Tunables ---------------------------------------------------------------
 constexpr float MOVE_THRESHOLD = 3.0f;    // m/s^2 of linear accel to count as a push
@@ -84,6 +90,15 @@ void setup() {
   uint32_t start = millis();
   while (!Serial && millis() - start < 3000) delay(10);  // wait for USB serial
   Serial.println("\nLSM6DSOX motion test (XIAO ESP32S3)");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.printf("\nWiFi connected, IP address: %s\n", WiFi.localIP().toString().c_str());
 
   Wire.begin();  // XIAO ESP32S3 default: SDA=GPIO5 (D4), SCL=GPIO6 (D5)
   Wire.setClock(400000);
