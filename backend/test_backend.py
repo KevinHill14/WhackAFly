@@ -5,7 +5,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "brain")); sys.path.insert(0, str(ROOT / "backend"))
 import ws
+import csv, tempfile, os
 import qnx
+from gesture import ThresholdClassifier, parse_sample
 from game import FlyGame, TICK_HZ
 
 FAIL = []
@@ -90,6 +92,33 @@ def round_tests():
     check(g.state == "dead" and g.phase == "won", "the fly stays dead after a win (no respawn in a round)")
     snap = g.snapshot()
     check(snap["phase"] == "won" and "time_left" in snap and snap["round_seconds"] == 5.0, "snapshot reports the round")
+
+def gesture_tests():
+    print("swatter classifier (stand-in for the model)")
+    still = ({"t": 0, "ax": 0.1, "ay": -0.2, "az": 9.81, "gx": 0.0, "gy": 0.0, "gz": 0.0})
+    check(parse_sample(still)[1] == [0.1, -0.2, 9.81], "a valid sample parses")
+    bad = 0
+    for s in ({}, {**still, "ax": "x"}, {**still, "gz": float("nan")}, {**still, "ay": True}, [1, 2], None):
+        try: parse_sample(s)
+        except ValueError: bad += 1
+    check(bad == 6, "bad samples are rejected")
+    c = ThresholdClassifier()
+    ev = []
+    for i in range(400): ev += c.update(i * 5, [0.1, -0.2, 9.81], [0.0, 0.0, 0.0])
+    check(ev == [], "a swatter lying still reports nothing (gravity is removed)")
+    ev = c.update(2000, [0.1, -0.2, 9.81], [6.0, 0.5, 0.0])
+    check(len(ev) == 1 and ev[0]["evt"] == "swing" and ev[0]["axis"] == "X" and ev[0]["dir"] == "positive", "a fast rotation is a swing about X")
+    check(c.update(2100, [0.1, -0.2, 9.81], [-7.0, 0.0, 0.0]) == [], "a second swing inside the cooldown is ignored")
+    ev = c.update(2600, [0.1, -0.2, 9.81], [0.0, -7.0, 0.0])
+    check(len(ev) == 1 and ev[0]["axis"] == "Y" and ev[0]["dir"] == "negative", "a swing after the cooldown counts")
+    c = ThresholdClassifier()
+    for i in range(300): c.update(i * 5, [0, 0, 9.81], [0, 0, 0])
+    ev = c.update(1600, [0, 0, 9.81 + 8.0], [0, 0, 0])
+    check(len(ev) == 1 and ev[0]["evt"] == "move" and ev[0]["axis"] == "Z" and ev[0]["dir"] == "positive", "a sharp push is a move")
+    c = ThresholdClassifier()
+    for i in range(300): c.update(i * 5, [0, 0, 9.81], [0, 0, 0])
+    ev = c.update(1600, [8.0, 0, 9.81], [5.0, 0, 0])
+    check(len(ev) == 1 and ev[0]["evt"] == "swing", "a swing is not also reported as a push")
 
 def qnx_tests():
     print("qnx module")
@@ -232,10 +261,106 @@ async def e2e_rounds():
     finally:
         back.terminate(); brain.terminate()
 
+async def stream_esp(sock, seconds, swing_at=None, t0=0):
+    """Play the ESP32: steady samples at about 200 Hz, with swing bursts at the given offsets (s)."""
+    n = int(seconds * 200); swing_at = swing_at or []
+    for i in range(n):
+        now = i / 200
+        gx = 6.0 if any(0 <= now - s < 0.025 for s in swing_at) else 0.0
+        await sock.send(json.dumps({"t": t0 + i * 5, "ax": 0.1, "ay": -0.2, "az": 9.81, "gx": gx, "gy": 0.0, "gz": 0.0}))
+        await asyncio.sleep(0.005)
+    return t0 + n * 5
+
+async def e2e_swatter():
+    print("end to end: swatter stream over WebSocket")
+    py = sys.executable
+    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--practice", "--port", "18795", "--esp-port", "18796",
+                             "--udp-port", "19030", "--brain", "ws://127.0.0.1:18799"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        await asyncio.sleep(1.5)
+        unity = None
+        for _ in range(20):
+            try: unity = await ws.connect("ws://127.0.0.1:18795"); break
+            except OSError: await asyncio.sleep(0.3)
+        q = asyncio.Queue()
+        async def pump():
+            try:
+                while True: await q.put(json.loads(await unity.recv()))
+            except ws.ConnectionClosed: pass
+        task = asyncio.ensure_future(pump())
+        async def until(pred, secs):
+            end = time.time() + secs
+            while time.time() < end:
+                try: m = await asyncio.wait_for(q.get(), 0.3)
+                except asyncio.TimeoutError: continue
+                if pred(m): return m
+            return None
+        m = await until(lambda m: m["type"] == "fly", 2)
+        check(m is not None and m.get("swatter") == "never", "before any swatter connects the link reads 'never'")
+        esp = await ws.connect("ws://127.0.0.1:18796")
+        for bad in ("not json", '{"ax":"a"}', "[1]", '{"t":1}'):
+            await esp.send(bad)
+        t = await stream_esp(esp, 1.2)
+        m = await until(lambda m: m["type"] == "event" and m.get("kind") == "swatter_link" and m["state"] == "ok", 2)
+        check(m is not None, "the link comes up once samples arrive")
+        t = await stream_esp(esp, 2.0, swing_at=[0.2, 0.3, 1.2], t0=t)
+        swings = []
+        while not q.empty():
+            m = q.get_nowait()
+            if m["type"] == "swatter" and m.get("evt") == "swing": swings.append(m)
+        check(len(swings) == 2 and swings[0]["axis"] == "X" and swings[0]["dir"] == "positive",
+              f"swings reach Unity once each, cooldown respected ({len(swings)} events)")
+        await unity.send(json.dumps({"type": "stats"}))
+        st = await until(lambda m: m["type"] == "stats", 2)
+        check(st is not None and st["swatter"]["bad_samples"] == 4 and 100 < st["swatter"]["samples_per_s"] < 400,
+              f"stats show the stream: {st and st['swatter']}")
+        m = await until(lambda m: m["type"] == "event" and m.get("kind") == "swatter_link" and m["state"] == "lost", 3)
+        check(m is not None, "the link is reported lost when samples stop")
+        await stream_esp(esp, 0.8, t0=t + 5000)
+        m = await until(lambda m: m["type"] == "event" and m.get("kind") == "swatter_link" and m["state"] == "ok", 3)
+        check(m is not None, "the link recovers when samples resume")
+        check(back.poll() is None, "backend still running after bad samples")
+        task.cancel(); await esp.close(); await unity.close()
+    finally:
+        back.terminate()
+
+async def collector_test():
+    print("data collector")
+    py = sys.executable
+    out = os.path.join(tempfile.mkdtemp(), "data", "train.csv")
+    col = subprocess.Popen([py, str(ROOT / "backend/collect.py"), "--auto", "--port", "18797", "--out", out, "--person", "tester",
+                            "--labels", "swing left,idle", "--trials", "2", "--seconds", "0.6"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        await asyncio.sleep(1.0)
+        esp = None
+        for _ in range(20):
+            try: esp = await ws.connect("ws://127.0.0.1:18797"); break
+            except OSError: await asyncio.sleep(0.3)
+        try: await stream_esp(esp, 4.5)
+        except (ws.ConnectionClosed, OSError): pass          # the collector exits when its trials are done
+        for _ in range(40):
+            if col.poll() is not None: break
+            await asyncio.sleep(0.25)
+        check(col.poll() == 0, "the collector finishes")
+        rows = list(csv.DictReader(open(out)))
+        check(list(rows[0].keys()) == ["timestamp", "ax", "ay", "az", "gx", "gy", "gz", "label", "trial_id", "person"], "CSV has the expected columns")
+        labels = {r["label"] for r in rows}; trials = {r["trial_id"] for r in rows}
+        check(labels == {"swing left", "idle"} and len(trials) == 4 and all(r["person"] == "tester" for r in rows),
+              f"4 trials of 2 actions saved ({len(rows)} rows)")
+        check(all(abs(float(r["az"]) - 9.81) < 0.01 for r in rows), "samples are stored unchanged")
+        try: await esp.close()
+        except Exception: pass
+    finally:
+        if col.poll() is None: col.terminate()
+
 unit_tests()
 regression_tests()
 round_tests()
+gesture_tests()
 qnx_tests()
 asyncio.run(end_to_end())
 asyncio.run(e2e_rounds())
+asyncio.run(e2e_swatter())
+asyncio.run(collector_test())
 print("FAILED: " + ", ".join(FAIL) if FAIL else "all passed"); sys.exit(1 if FAIL else 0)

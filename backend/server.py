@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ws  # noqa: E402  (brain/ws.py, stdlib WebSocket)
 import qnx  # noqa: E402  (QNX scheduling, slog2 logging, timing)
+from gesture import ThresholdClassifier, parse_sample  # noqa: E402
 from game import FlyGame, TICK_HZ, SWAT_REACH  # noqa: E402
 
 LOOMING_HZ = 20
@@ -30,6 +31,11 @@ class Backend:
         self.brain_url = brain_url
         self.ext_looming = None                # (value, side, time) sent by Unity's own senses
         self.brain_status = {}                 # latest status reply from the brain
+        self.classifier = ThresholdClassifier()    # stand-in for the trained model (same interface)
+        self.esp_clients, self.esp_count, self.esp_bad = 0, 0, 0
+        self.esp_last = None                   # monotonic time of the last good sample
+        self.esp_link = "never"                # never, ok or lost
+        self.esp_hz = 0.0
         self.clients = set()
         self.brain = None
         self.last_pose = time.monotonic()
@@ -138,11 +144,58 @@ class Backend:
                 "tick_period_ms": round(1000 / TICK_HZ, 2),
                 "tick_lateness_ms": self.tick_lateness.summary(),
                 "brain_rtt_ms": self.brain_rtt.summary(),
+                "swatter": {"link": self.esp_link, "samples_per_s": round(self.esp_hz, 1),
+                            "connections": self.esp_clients, "bad_samples": self.esp_bad,
+                            "classifier": self.classifier.name},
                 "brain_connected": self.brain is not None,
                 "brain_source": self.brain_status.get("source"),
                 "brain_mode": self.brain_status.get("mode"),
                 "round": {"phase": self.game.phase, "time_left": round(max(0.0, self.game.phase_time), 1),
                           "rounds": self.game.rounds}}
+
+    # ---- ESP32 sample stream over WebSocket -------------------------------
+    async def on_esp32(self, sock, path):
+        """The swatter streams IMU samples here; each one goes through the classifier."""
+        self.esp_clients += 1
+        qnx.log(qnx.SLOG_INFO, f"swatter connected from {sock.peer}")
+        try:
+            while True:
+                raw = await sock.recv()
+                try:
+                    t, accel, gyro = parse_sample(json.loads(raw))
+                except (ValueError, TypeError, RecursionError):
+                    self.esp_bad += 1                # a bad sample is dropped, never fatal
+                    continue
+                self.esp_last = time.monotonic()
+                self.esp_count += 1
+                for action in self.classifier.update(t if t is not None else qnx.now_ms(), accel, gyro):
+                    await self.send_all({"type": "swatter", **action})
+        except ws.ConnectionClosed:
+            pass
+        finally:
+            self.esp_clients -= 1
+            qnx.log(qnx.SLOG_INFO, "swatter disconnected")
+
+    async def link_loop(self):
+        """Watchdog for the swatter: no samples for half a second means the link is lost."""
+        last_count, last_time = 0, time.monotonic()
+        while True:
+            await asyncio.sleep(0.25)
+            now = time.monotonic()
+            self.esp_hz = (self.esp_count - last_count) / max(now - last_time, 1e-3)
+            last_count, last_time = self.esp_count, now
+            if self.esp_last is None:
+                state = "never"
+            else:
+                state = "ok" if now - self.esp_last < 0.5 else "lost"
+            if state != self.esp_link:
+                if state == "lost":
+                    qnx.log(qnx.SLOG_WARNING, "swatter link lost (no samples for 0.5 s)")
+                elif state == "ok":
+                    qnx.log(qnx.SLOG_INFO, "swatter link up")
+                    self.classifier.reset()          # the gravity estimate is stale after a gap
+                self.esp_link = state
+                await self.send_all({"type": "event", "kind": "swatter_link", "state": state})
 
     # ---- ESP32 over UDP -------------------------------------------------
     def udp_protocol(self):
@@ -230,6 +283,7 @@ class Backend:
                 if self.clients:
                     snap = self.game.snapshot()
                     snap["brain"] = self.brain_status.get("source")        # "live", "fallback" or None
+                    snap["swatter"] = self.esp_link                        # "never", "ok" or "lost"
                     await self.send_all(snap)
                     for e in self.game.events:
                         await self.send_all({"type": "event", **e})
@@ -247,7 +301,8 @@ class Backend:
 async def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8766, help="WebSocket port for Unity")
-    p.add_argument("--udp-port", type=int, default=9000, help="UDP port for the ESP32")
+    p.add_argument("--udp-port", type=int, default=9000, help="UDP port for ESP32 events")
+    p.add_argument("--esp-port", type=int, default=8767, help="WebSocket port for the ESP32 sample stream")
     p.add_argument("--brain", default="ws://127.0.0.1:8765", help="brain server URL")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--practice", action="store_true", help="free play: no countdown or timer, the fly respawns")
@@ -258,10 +313,11 @@ async def main():
     b = Backend(a.brain, rounds=not a.practice, countdown_s=a.countdown_seconds, round_s=a.round_seconds)
     b.qnx_info = qnx.startup(a.rt_priority)
     await ws.serve(b.on_client, a.host, a.port)
+    await ws.serve(b.on_esp32, a.host, a.esp_port)
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(b.udp_protocol, local_addr=(a.host, a.udp_port))
-    qnx.log(qnx.SLOG_NOTICE, f"listening: Unity ws://{a.host}:{a.port}  ESP32 udp://{a.host}:{a.udp_port}  brain {a.brain}")
-    await asyncio.gather(b.brain_loop(), b.looming_loop(), b.tick_loop())
+    qnx.log(qnx.SLOG_NOTICE, f"listening: Unity ws://{a.host}:{a.port}  ESP32 stream ws://{a.host}:{a.esp_port}  ESP32 events udp://{a.host}:{a.udp_port}  brain {a.brain}")
+    await asyncio.gather(b.brain_loop(), b.looming_loop(), b.tick_loop(), b.link_loop())
 
 
 if __name__ == "__main__":

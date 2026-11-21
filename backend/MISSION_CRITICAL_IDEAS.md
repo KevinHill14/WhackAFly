@@ -42,11 +42,11 @@ Suggested order: 1 and 3 first (quick, strongest visual), then 2, 4, 5.
 
 1. **Live failover demo.** Stop the brain mid-game and show the fly keep moving, with the
    neuron panel switching to "fallback" and back. Best evidence for "reliability matters".
-   Needs: a way to stop the brain on cue (for example `sh backend/start.sh stop` for the brain
-   only, or the brain's `--debug` stall command) and a visible mode label in Unity.
-2. **Swatter link watchdog.** If the swatter goes silent for a moment, flag "input lost", hold
-   a safe state, and recover when it returns. Needs: a heartbeat from the ESP32 firmware and a
-   timeout check in `backend/server.py`.
+   *Backend side built:* send `{"type":"brain_mode","mode":"fallback"}` to switch on cue; the fly
+   state reports `brain` as `live` or `fallback`. Still to do: a visible mode label in Unity.
+2. **Swatter link watchdog.** *Backend side built:* the sample stream is the heartbeat; no
+   samples for 0.5 s reports `lost`, and `ok` again when it returns (`swatter` in the fly state,
+   `swatter_link` events, `stats`). Still to do: Unity shows "input lost" and holds a safe state.
 3. **Health display in Unity.** Show the `stats` figures on screen: tick lateness, brain round
    trip, deadline misses, current brain mode (live or fallback), link state.
 4. **Auto-restart supervisor.** A loop in `start.sh` that restarts a crashed server and logs it

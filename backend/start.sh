@@ -12,6 +12,7 @@
 #   BRAIN_PORT=8765  BACKEND_PORT=8766  UDP_PORT=9000
 #   RT_PRIORITY=20                       QNX real-time priority (0 = leave at the default)
 #   PRACTICE=1                           free play: no countdown or timer, the fly respawns
+#   ESP32_PORT=8767                      WebSocket port the swatter streams its IMU samples to
 #
 # Works with plain POSIX sh and Python 3 on QNX or Linux. NumPy is optional: without
 # it the brain answers from its lookup table.
@@ -23,6 +24,7 @@ BRAIN_MODE=${BRAIN_MODE:-auto}
 BRAIN_PORT=${BRAIN_PORT:-8765}
 BACKEND_PORT=${BACKEND_PORT:-8766}
 UDP_PORT=${UDP_PORT:-9000}
+ESP32_PORT=${ESP32_PORT:-8767}
 RT_PRIORITY=${RT_PRIORITY:-20}
 mkdir -p "$RUN"
 
@@ -63,6 +65,7 @@ case "$1" in
         fi
         port_open "$BRAIN_PORT" && echo "port $BRAIN_PORT: open" || echo "port $BRAIN_PORT: closed"
         port_open "$BACKEND_PORT" && echo "port $BACKEND_PORT: open" || echo "port $BACKEND_PORT: closed"
+        port_open "$ESP32_PORT" && echo "port $ESP32_PORT: open (swatter stream)" || echo "port $ESP32_PORT: closed"
         exit 0 ;;
     logs)
         if command -v slog2info >/dev/null 2>&1; then slog2info 2>/dev/null | grep "flyai:" | tail -n 30
@@ -90,7 +93,11 @@ fi
 # Stop copies this script started earlier, and refuse if something else owns a port.
 stop_one backend; stop_one brain
 sleep 1
-for p in "$BRAIN_PORT" "$BACKEND_PORT"; do
+if [ "$ESP32_PORT" = "$BRAIN_PORT" ] || [ "$ESP32_PORT" = "$BACKEND_PORT" ]; then
+    echo "ERROR: ESP32_PORT ($ESP32_PORT) must differ from BRAIN_PORT ($BRAIN_PORT) and BACKEND_PORT ($BACKEND_PORT)."
+    exit 1
+fi
+for p in "$BRAIN_PORT" "$BACKEND_PORT" "$ESP32_PORT"; do
     if port_open "$p"; then
         echo "ERROR: port $p is already in use by another program. Stop it first."
         exit 1
@@ -123,7 +130,7 @@ echo "brain:   ws://0.0.0.0:$BRAIN_PORT  (log: backend/.run/brain.log)"
 
 PRACTICE_ARG=""
 [ "${PRACTICE:-0}" = "1" ] && PRACTICE_ARG="--practice"
-python3 backend/server.py $PRACTICE_ARG --rt-priority "$RT_PRIORITY" --port "$BACKEND_PORT" --udp-port "$UDP_PORT" --brain "ws://127.0.0.1:$BRAIN_PORT" >"$RUN/backend.log" 2>&1 &
+python3 backend/server.py $PRACTICE_ARG --rt-priority "$RT_PRIORITY" --port "$BACKEND_PORT" --esp-port "$ESP32_PORT" --udp-port "$UDP_PORT" --brain "ws://127.0.0.1:$BRAIN_PORT" >"$RUN/backend.log" 2>&1 &
 echo $! >"$RUN/backend.pid"
 i=0
 until port_open "$BACKEND_PORT"; do
@@ -134,12 +141,13 @@ until port_open "$BACKEND_PORT"; do
     fi
     sleep 1
 done
-echo "backend: ws://0.0.0.0:$BACKEND_PORT  udp :$UDP_PORT  (log: backend/.run/backend.log)"
+echo "backend: ws://0.0.0.0:$BACKEND_PORT  swatter stream ws://0.0.0.0:$ESP32_PORT  udp :$UDP_PORT  (log: backend/.run/backend.log)"
 
 IP=$(my_ip)
 echo
 echo "Ready. On the laptop running Unity, set:"
 echo "  export FLYAI_BACKEND=ws://${IP:-<pi-ip>}:$BACKEND_PORT"
+echo "The ESP32 firmware must stream to ws://${IP:-<pi-ip>}:$ESP32_PORT (not the brain's port $BRAIN_PORT)."
 echo "Press Ctrl+C to stop."
 
 # Stay in the foreground; if either server dies, report it and stop the other.
