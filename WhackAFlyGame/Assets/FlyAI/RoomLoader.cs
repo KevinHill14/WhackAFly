@@ -160,6 +160,8 @@ namespace FlyAI
             ceilingOwner = null;
         }
 
+        public string ThemeName => theme.name;
+
         public void ToggleDebugBoxes()
         {
             if (debugBoxes != null) debugBoxes.SetActive(!debugBoxes.activeSelf);

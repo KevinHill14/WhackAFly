@@ -108,6 +108,7 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | Fly | `FlyAgent` | Fly model, perching and hopping between landing spots, looming from the swatter, escape, swat kill |
 | | `NeuralView` | Bottom-right brain view: every neuron as a dot in a fly-head shape; firing neurons flash red |
 | | `FlyBrainClient` | WebSocket client for the brain server; auto-reconnects |
+| Scores | `Leaderboard` | Times each round, asks for a name after a swat, shows the top 10, and logs game events to `leaderboard/server.py` |
 | Tools | `FlyCamera` | Free debug camera and all debug keys |
 | | `Editor/FlyAITextureImport` | Keeps texture import settings correct |
 
@@ -295,9 +296,79 @@ Light and events change what the fly sees. The panel's Light line shows the ligh
 
 Finding it: the buzz is loud in flight and muffled when the fly is behind you, so you can turn toward it by ear. A perched fly gives a short buzz every 3-6 s. About 1 s after it lands, a light blue marker and glow slowly brighten over 7 s; the marker sits on the fly, or at the screen edge with an arrow when it is off screen. It goes dark again when the fly takes off. `BeaconDelay` and `BeaconRamp` in `FlyAgent.cs` set the timing. The fly also reports its distance to `RoomTension` every frame. Tuning constants are at the top of `FlyAgent.cs`.
 
+## Leaderboard
+
+After the fly is swatted, a panel asks for a name (type it, `Enter` submits, `Esc` skips). The run goes to the leaderboard server, and the panel then shows the top 10 with your row in green. `R` starts a new round; `Esc` hides the board. While the name box is open, game keys are ignored so letters spell the name. The last name used is remembered.
+
+**Score.** A round runs from the room loading (or `R`) to the swat. Lowest damage bill wins; equal bills go to the faster time. Damage done after the swat does not count. Time is real time, so hit-stop and the debug camera do not pause it.
+
+**Why a server.** The game never holds database credentials. `Leaderboard.cs` only speaks HTTP to `leaderboard/server.py`, which holds the connection string and talks to Postgres on Tiger Cloud (Tiger Data, formerly Timescale). Requests are `UnityWebRequest` coroutines, so the game never waits on the network.
+
+**Game log.** The same server also stores game events for a spectator dashboard (live feed, replays). Each round gets an id, and `Leaderboard.Log` queues events that are sent in batches about once a second:
+
+| Event | When | Fields |
+|---|---|---|
+| `round_start` | Room loaded or `R` | theme |
+| `swing` | Every swing | damage, data: hit, target, part, strength, x/y/z, running bill |
+| `fly_escape` | The brain makes the fly take off | data: strength, side, stimulus source, fly x/y/z |
+| `fly_flee` | The brain makes the fly walk away (once per flee) | data: strength, side, source |
+| `fly_swatted` | The fly dies, named or not | damage, seconds, theme |
+| `round_result` | A name is submitted (via `POST /scores`) | player name, damage, seconds, theme |
+
+To log something new, call `Leaderboard.Log("kind", Leaderboard.Data("key", value, ...))` from any script. Kinds are lowercase, up to 32 characters.
+
+**Optional by design.** With the server, Tiger Cloud or the internet down, the game plays normally. A failed event batch is dropped, the Console says so once, and the game retries after 15 s. The server itself starts even if the database is unreachable, and answers `503` within about 5 s until it comes back.
+
+**Set up Tiger Cloud (once).**
+
+1. Sign up at Tiger Data, create a service (the free tier is enough), and copy its connection string from the service's Connect page. It looks like `postgres://tsdbadmin:...@....tsdb.cloud.timescale.com:PORT/tsdb?sslmode=require`.
+2. Copy `leaderboard/.env.example` to `leaderboard/.env` and paste it in as `LEADERBOARD_DATABASE_URL`. `.env` is git-ignored; never commit it.
+3. Install the one dependency and start the server. On first connect it creates the `game_events` table (a hypertable on Tiger Cloud) and the `leaderboard` view.
+
+```powershell
+pip install -r leaderboard/requirements.txt
+```
+
+```powershell
+python leaderboard/server.py
+```
+
+It listens on `http://127.0.0.1:8768` (not 8766, the game backend uses that; the game only talks to it when `FLYAI_LEADERBOARD=http://127.0.0.1:8768` is set) and prints `[leaderboard] listening on ...`. Then press Play. The Console logs `[FlyAI] Leaderboard at ...`.
+
+- `FLYAI_LEADERBOARD` sets another server URL (for example a laptop on the LAN; also set `LEADERBOARD_HOST=0.0.0.0` on that server). `off` turns the leaderboard and the event log off, and a swat then just shows the message as before.
+- If the server is down, the board says "Leaderboard offline" and the game carries on. That run is not saved.
+- It prints `[leaderboard] database ready (game_events hypertable)` once it reaches Tiger Cloud.
+
+**API** (all JSON):
+
+| Request | Result |
+|---|---|
+| `GET /scores?limit=10` | `{"scores": [{"name", "damage", "seconds", "theme", "at"}, ...]}`, best first (limit 1-100) |
+| `POST /scores` with `{"round_id", "name", "damage", "seconds", "theme"}` | `201 {"rank": 3, "scores": [top 10]}`. One result per round. Names are trimmed to 20 characters. Bad input is `400` |
+| `POST /events` with `{"round_id", "events": [{"kind", "t", "damage"?, "seconds"?, "theme"?, "data"?}]}` | `201 {"stored": n}`. Up to 500 events per batch; `t` is seconds since the round started |
+| `GET /health` | `{"ok": true, "database": true}` (`database` is false while Tiger Cloud is unreachable) |
+
+**Tables.** One time-series table holds everything. On Tiger Cloud it is a TimescaleDB hypertable on `time`:
+
+`game_events(time, round_id, kind, round_time, player_name, damage, seconds, theme, data jsonb)`
+
+The leaderboard is a view over the named `round_result` rows:
+
+```sql
+SELECT player_name, damage, seconds, theme, created_at
+FROM leaderboard
+ORDER BY damage, seconds, created_at
+LIMIT 10;
+```
+
+Dashboard queries read `game_events` directly. For example, a live feed is `SELECT * FROM game_events ORDER BY time DESC LIMIT 50`, and a replay is `SELECT * FROM game_events WHERE round_id = '...' ORDER BY round_time`.
+
+**Test.** `python leaderboard/test_server.py` starts the server and runs 25 HTTP checks: ranking, ties, top 10, one result per round, the event log, validation, injection, and starting with the database down. It uses `LEADERBOARD_TEST_DATABASE_URL` if set (`game_events` there is dropped first, so never point it at the real board), otherwise a temporary local Postgres from `pip install pgserver`. Plain Postgres has no TimescaleDB, so the hypertable step only runs on Tiger Cloud.
+
 ## Known limitations
 
-- Win/lose flow is minimal: a squashed fly shows a message, and `R` reloads the room.
+- Win/lose flow is minimal: a squashed fly shows a message and the leaderboard, and `R` reloads the room.
+- Anyone who can reach the leaderboard server can post any score; there is no anti-cheat. Keep it on `127.0.0.1` or a trusted LAN.
 - The fly has one hop-and-perch behaviour and no crawling. Its swat check ignores walls and furniture in between.
 - There is no menu, and only one theme.
 - `L` swaps props, sounds and markers only. Lights stay from the layout that was loaded.
@@ -324,6 +395,8 @@ Finding it: the buzz is loud in flight and muffled when the fly is behind you, s
 | Mouse or keys do nothing | Click the Game view to give it focus and capture the cursor |
 | Player stuck | Press `R` to respawn, or `Tab` to inspect |
 | `L` says no AI layout | The scan needs both `room.ai.json` and `room.rules.json` |
+| "Leaderboard offline" | Is `python leaderboard/server.py` running? Check `FLYAI_LEADERBOARD`. The server prints database errors itself |
+| Server says set `LEADERBOARD_DATABASE_URL` | Create `leaderboard/.env` from `.env.example` |
 | Low frame rate | Press `F`, set `LampSway.MaxDegrees` to 0, or lower `MaxShadowLights` |
 
 ## Motion sensor test (gyro + accelerometer)
@@ -341,3 +414,7 @@ Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).
 - **Countdown:** the player cannot walk or turn during the 3-2-1 (`GameRound.CanMove`); aiming and the swatter stay free, swinging is blocked until HUNT.
 - **Difficulty slider** (main menu, under Theme; saved as `FlyAI.Difficulty`): Easy, Medium, Hard (`Difficulty.cs`). Each fly rolls five traits (skittish, restless, night sight, pace, hearing). Easy takes only the low side of each (slower, calmer, hard of hearing), Hard only the high side (faster, jumpier, sharp ears), Medium picks either side per trait at random, so it is a combination. The result screen shows the level.
 - **Pi backend** (`backend/`, the `backend-split` branch): `BackendClient` connects to `FLYAI_BACKEND` (default `ws://127.0.0.1:8766`; `off` disables it). If it is connected when a room loads, the backend runs the fly (`FlyView` draws it, `BeginRemoteRound`), Unity keeps the room, the round UI and the senses. Sounds go to it as `stimulus` messages, the hunt start sends `reset` with `start:true` (no second countdown), and a `squish` event wins the round. Difficulty is sent as `difficulty` (0-2) and scales its fly speed and how threatening the swatter looks. If the backend is not reachable the game runs the local `FlyAgent` and brain as before.
+
+## Best runs (main menu)
+
+Every win is saved on this computer (`FlyAI-scores.json` in the Unity persistent data folder, best 200 kept): time, difficulty, damage to the apartment, swings. The menu shows the top 10 on the right. **Filter** (top right) cycles the sort key Time, Difficulty, Damage; **Reverse** flips the order (Difficulty goes easy to hard, or hard to easy; time and damage go low to high, or high to low). Ties are broken in the order time, difficulty, damage, swings. This is separate from `Leaderboard.cs` (Eesha's online board and event log), which is now off unless `FLYAI_LEADERBOARD` is set.

@@ -128,6 +128,9 @@ namespace FlyAI
         {
             if (CurrentPhase != Phase.Playing) return;
             timeTaken = RoundSeconds - timeLeft;
+            var bill = player != null ? player.DamageBill : 0;
+            LocalScores.Add(timeTaken, Difficulty.Level, bill, swings, FindFirstObjectByType<RoomLoader>()?.ThemeName);
+            Leaderboard.FlySwatted(bill, timeTaken);
             End(Phase.Won);
             Say("announce_smushed");
             if (player != null) player.AddPopup(point, "SMUSHED!", new Color(0.3f, 1f, 0.35f), 40);

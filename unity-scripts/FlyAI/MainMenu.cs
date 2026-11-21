@@ -336,6 +336,7 @@ namespace FlyAI
                 default: DrawLoading(unit); break;
             }
             GUILayout.EndArea();
+            if (mode == Mode.Main) LocalScores.Draw(width, unit, (width - columnWidth) * 0.5f - 20f);
         }
 
         // A button that is smaller than its slot but sits in the middle of it, so the layout does not move.
