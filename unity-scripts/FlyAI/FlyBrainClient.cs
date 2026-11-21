@@ -43,6 +43,9 @@ namespace FlyAI
         public volatile bool Connected;
         public volatile int[] NeuronGroups;
         public volatile string[] GroupNames;
+        // How fresh each input channel is (1 = not used to it), from the brain's habituation: left eye, right eye,
+        // left ear, right ear. All 1 until the brain reports.
+        public volatile float[] Efficacy = { 1f, 1f, 1f, 1f };
         public volatile string BrainInfo = ""; // e.g. "live, 1602 neurons", from the server's status reply.
 
         readonly ConcurrentQueue<BrainEscape> escapes = new ConcurrentQueue<BrainEscape>();
@@ -51,6 +54,7 @@ namespace FlyAI
         float looming;
         string eye = "center";
         float sound;
+        volatile bool resetPending;
         string ear = "center";
 
         public FlyBrainClient(string url)
@@ -79,6 +83,9 @@ namespace FlyAI
 
         // What the ears hear (0-1) and which ear: "left", "right" or "center". Sent as a "sound" message, so the
         // brain's Johnston's organ neurons get it, not the eyes.
+        // A fresh fly: clears the brain's habituation and anything it was holding. Sent at the start of each round.
+        public void Reset() => resetPending = true;
+
         public void SetSound(float value, string side)
         {
             lock (gate)
@@ -155,13 +162,40 @@ namespace FlyAI
                     await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)), WebSocketMessageType.Text, true, token);
                     lastSoundSent = heard;
                 }
+                if (resetPending)
+                {
+                    resetPending = false;
+                    await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("{\"type\":\"reset\"}")), WebSocketMessageType.Text, true, token);
+                }
                 if (clock.Elapsed.TotalSeconds >= nextStatus)
                 {
-                    nextStatus = (float)clock.Elapsed.TotalSeconds + 2f;
+                    nextStatus = (float)clock.Elapsed.TotalSeconds + 0.5f;
                     await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("{\"type\":\"status\"}")), WebSocketMessageType.Text, true, token);
                 }
                 await Task.Delay(SendIntervalMs, token);
             }
+        }
+
+        static readonly string[] Channels = { "eye_left", "eye_right", "ear_left", "ear_right" };
+
+        // The status reply has "efficacy": {"eye_left": 1.0, ...}, which JsonUtility cannot read, so pick the numbers out.
+        void ParseEfficacy(string json)
+        {
+            var start = json.IndexOf("\"efficacy\"", StringComparison.Ordinal);
+            if (start < 0) return;
+            var values = new float[4];
+            for (var i = 0; i < 4; i++)
+            {
+                values[i] = 1f;
+                var key = json.IndexOf("\"" + Channels[i] + "\"", start, StringComparison.Ordinal);
+                if (key < 0) continue;
+                var colon = json.IndexOf(':', key);
+                if (colon < 0) continue;
+                var end = colon + 1;
+                while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '.' || json[end] == '-' || json[end] == ' ' || json[end] == 'e')) end++;
+                if (float.TryParse(json.Substring(colon + 1, end - colon - 1).Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) values[i] = v;
+            }
+            Efficacy = values;
         }
 
         async Task Receive(ClientWebSocket socket, CancellationToken token)
@@ -182,6 +216,7 @@ namespace FlyAI
                     if (message != null && message.type == "status")
                     {
                         BrainInfo = $"{message.source}, {message.neurons} neurons";
+                        ParseEfficacy(json);
                         if (message.neuron_groups != null && message.neuron_groups.Length > 0)
                         {
                             NeuronGroups = message.neuron_groups;

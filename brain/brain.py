@@ -20,6 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
+from habituation import Habituation
+
 # --- Shiu et al. 2024 constants (mV, ms) ---
 V_0 = -52.0
 V_RST = -52.0
@@ -43,7 +45,7 @@ SUBNET_DIR = Path(__file__).resolve().parent / "subnet"
 
 
 class FlyBrain:
-    def __init__(self, path=None, max_rate_hz=None, seed=None):
+    def __init__(self, path=None, max_rate_hz=None, seed=None, habituation=False):
         path = Path(path) if path else SUBNET_DIR / "subnet_t5.npz"
         s = np.load(path, allow_pickle=False)
         self.path = path
@@ -107,9 +109,43 @@ class FlyBrain:
         self.decay_g = np.float32(np.exp(-DT / TAU))
         self.k_v = np.float32(DT / T_MBR)
         self.poisson_kick = np.float32(W_SYN * F_POI)
+
+        # Habituation (habituation.py): each input channel's outgoing synapses
+        # are scaled by its efficacy. Only rows that have outgoing connections
+        # matter; keep a pristine copy of them so efficacy 1 restores them
+        # exactly. Off by default (calibration and the lookup table measure
+        # the fresh brain); the server turns it on.
+        self.hab = Habituation(enabled=habituation)
+        rows = {"eye_left": self.inputs_left, "eye_right": self.inputs_right,
+                "ear_left": self.ears["left"], "ear_right": self.ears["right"]}
+        self._hab_rows = {c: r[self.has_out[r]] for c, r in rows.items()}
+        self._hab_w0 = {c: w[r].copy() for c, r in self._hab_rows.items()}
+        self._hab_applied = {c: 1.0 for c in rows}
         self.reset()
 
+    def _apply_efficacy(self, eff):
+        for c, x in eff.items():
+            if x != self._hab_applied[c]:
+                r = self._hab_rows[c]
+                if len(r):
+                    self.w[r] = self._hab_w0[c] if x == 1.0 else self._hab_w0[c] * np.float32(x)
+                self._hab_applied[c] = x
+
+    def set_habituation(self, on):
+        """Turn habituation on/off; either way the synapses start fresh."""
+        self.hab.set_enabled(on)
+        self._apply_efficacy(self.hab.efficacy())
+
+    def load_habituation(self, snap):
+        """Take over a habituation state (from the fallback, after a switch)."""
+        if self.hab.enabled:
+            self.hab.load(snap)
+            self._apply_efficacy(self.hab.efficacy())
+
     def reset(self):
+        """New round: network state cleared, synapses fresh."""
+        self.hab.reset()
+        self._apply_efficacy(self.hab.efficacy())
         n = self.n
         self.v = np.full(n, V_0, dtype=np.float32)
         self.g = np.zeros(n, dtype=np.float32)
@@ -201,8 +237,13 @@ class FlyBrain:
             self.t += 1
         return counts
 
-    def decide(self, value, side="center", sound=0.0, sound_side="center"):
-        """One 50 ms window of looming and/or sound in -> one escape decision out."""
+    def decide(self, value, side="center", sound=0.0, sound_side="center", elapsed_s=None):
+        """One 50 ms window of looming and/or sound in -> one escape decision out.
+        elapsed_s: real time since the previous decision (habituation recovers
+        over it; default and minimum 50 ms)."""
+        value = float(min(max(value, 0.0), 1.0))
+        sound = float(min(max(sound, 0.0), 1.0))
+        self._apply_efficacy(self.hab.advance(value, side, sound, sound_side, elapsed_s))
         counts = self.run(value, side, sound, sound_side)
         g = np.bincount(self.group_id, weights=counts,
                         minlength=self.n_groups).astype(int)
@@ -234,7 +275,8 @@ class FlyBrain:
                 "side": self.jump, "spikes": g.tolist(),
                 "active": np.flatnonzero(counts).tolist(),   # indices of neurons that fired (for the game's brain view)
                 "gf": [int(g[name("DNp01_L")]), int(g[name("DNp01_R")])],
-                "vote": [int(left_threat), int(right_threat)]}
+                "vote": [int(left_threat), int(right_threat)],
+                "hab": self.hab.snapshot()}
 
 
 def calibration_path(subnet_path):

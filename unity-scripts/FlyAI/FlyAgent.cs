@@ -198,6 +198,7 @@ namespace FlyAI
         {
             nextAmbient = Time.time + Random.Range(4f, 8f) / restless;
             cooldownUntil = Time.time + 0.5f;
+            client?.Reset(); // A fresh fly: it is not used to anything yet.
         }
 
         void Init(List<Spot> landing, RoomAssets assets, float ceiling)
@@ -997,6 +998,15 @@ namespace FlyAI
 
         static int Spike(int[] spikes, int index) => spikes != null && index < spikes.Length ? spikes[index] : 0;
 
+        // How used to each kind of input the fly has got (100% = fresh, lower = it reacts less).
+        string HabituationLine()
+        {
+            var e = client?.Efficacy;
+            if (e == null) return "";
+            string P(float v) => v < 0.97f ? $"<color=#FFC857>{Mathf.RoundToInt(v * 100f)}%</color>" : "100%";
+            return $"<b>Used to it</b>  eyes L {P(e[0])} R {P(e[1])}   ears L {P(e[2])} R {P(e[3])}";
+        }
+
         void OnGUI()
         {
             if (MainMenu.Active) return;
@@ -1027,6 +1037,7 @@ namespace FlyAI
                 $"<b>Stimulus</b>   looming {looming:0.00}   eye {eye}   from {source}",
                 $"<b>Light</b>       at fly {lightLevel:0.00}   vision {vision:0.00}   flashlight on fly {flashlightOnFly:0.00}",
                 $"<b>Brain out</b>  strength {strength:0.00}   jumps {(fresh ? lastDecisionSide : "-")}",
+                HabituationLine(),
                 $"Eye inputs     LPLC2 L{Spike(spikes, 0)} R{Spike(spikes, 1)}    LC4 L{Spike(spikes, 2)} R{Spike(spikes, 3)}",
                 $"Giant Fiber    L{Spike(spikes, 9)} R{Spike(spikes, 10)}   (DNp01)",
                 $"Escape DNs     02: {Spike(spikes, 11)}/{Spike(spikes, 12)}   04: {Spike(spikes, 13)}/{Spike(spikes, 14)}   11: {Spike(spikes, 17)}/{Spike(spikes, 18)}",
