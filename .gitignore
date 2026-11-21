@@ -72,3 +72,44 @@ local.properties
 
 # Local firmware config (WiFi credentials)
 firmware/include/config.h
+
+# --- FlyAI (LiDAR and Unity) ---
+# Python
+*.pyc
+
+# Secrets and certificates
+*.key
+*.p12
+*.pfx
+*.keystore
+certs/
+secrets/
+*secret*.json
+*secrets*.json
+*credential*.json
+*credentials*.json
+*service-account*.json
+*service_account*.json
+client_secret*.json
+application_default_credentials.json
+*api_key*
+*api-key*
+*apikey*
+
+# Room scans show the layout of real places
+data/
+samples/
+uploads/
+
+# Large brain data
+*.parquet
+*.npz
+neurons.tsv
+
+# Unity
+[Oo]bj/
+[Bb]uild/
+*.slnx
+.vs/
+
+# OS

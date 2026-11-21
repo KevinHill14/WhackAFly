@@ -1,0 +1,42 @@
+All art below is licensed CC0 1.0.
+
+Room textures from ambientCG (https://ambientcg.com)
+Floor: WoodFloor051
+Wall: PaintedPlaster017
+Ceiling: Plaster001
+Wood: Wood051
+
+Prop models from Poly Haven (https://polyhaven.com), textures reduced to 512 px
+bowl: wooden_bowl_02
+apple: food_apple_01
+books: book_encyclopedia_set_01
+plate: carved_wooden_plate
+potted_plant: potted_plant_02
+cup: ceramic_vase_04
+takeout_box: CheeseBox_01
+jar: antique_ceramic_vase_01
+rotten_banana: bananas
+trash_bag: trashbag
+pillow: throw_pillows_01
+radio: boombox
+wall_clock: wall_clock
+table_clock: alarm_clock_01
+lemon: lemon
+pear: food_pears_asian_01
+kiwi: food_kiwi_01
+bowl_large: wooden_bowl_01
+small_plant: potted_plant_04
+knife: fish_knife
+spoon: wooden_spoon
+goblets: brass_goblets
+water_bottle: plastic_thermos
+laptop: classic_laptop
+jug: jug_01
+brass_vase: brass_vase_04
+basket: wicker_basket_02
+notebook: binder_notebook
+picture_frame: standing_picture_frame_01
+picture_d: fancy_picture_frame_02
+picture_e: hanging_picture_frame_03
+picture_c: fancy_picture_frame_01
+mirror: ornate_mirror_01

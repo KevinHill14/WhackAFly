@@ -1,0 +1,4 @@
+aiohttp>=3.9,<4
+anthropic>=2.12,<3
+numpy>=1.26,<3
+qrcode>=7.4,<9
