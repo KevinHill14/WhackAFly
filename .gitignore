@@ -116,3 +116,6 @@ neurons.tsv
 
 # Claude Code local state
 .claude/
+
+# Fly brain: raw connectome data (fetch with brain/get_data.sh)
+brain/data/
