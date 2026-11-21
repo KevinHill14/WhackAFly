@@ -11,6 +11,18 @@ ESP32 swatter --UDP :9000--> backend --WS :8766--> Unity (laptop)
 
 ## Run
 
+One command starts the brain and then the backend, and prints the address Unity needs:
+
+```sh
+sh backend/start.sh           # Ctrl+C stops both
+sh backend/start.sh status    # what is running
+sh backend/start.sh stop      # stop servers it left running
+```
+
+Options are environment variables: `SUBNET` (brain size, default `brain/subnet/subnet_t10.npz`),
+`BRAIN_MODE` (`auto`, `live` or `fallback`), `BRAIN_PORT`, `BACKEND_PORT`, `UDP_PORT`.
+Logs go to `backend/.run/`. To start by hand instead:
+
 ```sh
 python3 brain/server.py --mode auto &     # the fly brain (add --subnet brain/subnet/subnet_t10.npz on the Pi)
 python3 backend/server.py                 # Unity on :8766, ESP32 on UDP :9000

@@ -38,7 +38,7 @@ namespace FlyAI
             {
                 if (e.evt != "swing") continue;
                 frame.swing = true;
-                frame.swingStrength = Mathf.Clamp01(Mathf.InverseLerp(MinRate * 0.5f, FullRate, e.rate));
+                frame.swingStrength = Mathf.Lerp(0.4f, 1f, Mathf.InverseLerp(MinRate, FullRate, e.rate));
             }
             return frame;
         }

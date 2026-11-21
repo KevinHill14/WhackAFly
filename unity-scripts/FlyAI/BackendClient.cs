@@ -99,24 +99,24 @@ namespace FlyAI
                 if (!first) sb.Append(',');
                 first = false;
                 var normal = spot.normal != null && spot.normal.Length == 3 ? new Vector3(-spot.normal[0], spot.normal[1], spot.normal[2]) : Vector3.up;
-                sb.Append("{\"id\":\"").Append(spot.id).Append("\",\"position\":").Append(V(RoomLoader.ToUnity(spot.position)))
+                sb.Append("{\"position\":").Append(V(RoomLoader.ToUnity(spot.position)))
                   .Append(",\"normal\":").Append(V(normal)).Append('}');
             }
             sb.Append("]}");
-            Current.pendingRoom = sb.ToString();   // resent after every reconnect
-            Current.outgoing.Enqueue(Current.pendingRoom);
+            Current.pendingRoom = sb.ToString();   // sent now if connected, and again after every reconnect
+            if (Current.connected) Current.outgoing.Enqueue(Current.pendingRoom);
         }
 
         public static void SendPose(Vector3 head, Vector3 aim, float reach)
         {
-            if (Current == null || Time.unscaledTime - Current.lastPose < PoseInterval) return;
+            if (Current == null || !Current.connected || Time.unscaledTime - Current.lastPose < PoseInterval) return;
             Current.lastPose = Time.unscaledTime;
             Current.outgoing.Enqueue($"{{\"type\":\"pose\",\"head\":{V(head)},\"aim\":{V(aim)},\"reach\":{F(reach)}}}");
         }
 
         public static void SendSwing(Vector3 origin, Vector3 direction, float strength, float reach)
         {
-            if (Current == null) return;
+            if (Current == null || !Current.connected) return;   // old swings must not replay later
             Current.outgoing.Enqueue($"{{\"type\":\"swing\",\"origin\":{V(origin)},\"dir\":{V(direction)},\"strength\":{F(strength)},\"reach\":{F(reach)}}}");
         }
 
@@ -136,8 +136,9 @@ namespace FlyAI
                     try
                     {
                         await socket.ConnectAsync(new Uri(url), token);
-                        connected = true;
+                        while (outgoing.TryDequeue(out _)) { }   // drop anything queued before the connection
                         if (pendingRoom != null) outgoing.Enqueue(pendingRoom);
+                        connected = true;
                         await Task.WhenAny(Receive(socket, token), Send(socket, token));
                     }
                     catch (Exception) when (!token.IsCancellationRequested) { }

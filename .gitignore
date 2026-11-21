@@ -119,3 +119,6 @@ neurons.tsv
 
 # Fly brain: raw connectome data (~135 MB, fetch with brain/get_data.sh)
 brain/data/
+
+# Backend runtime files (pids and logs)
+backend/.run/

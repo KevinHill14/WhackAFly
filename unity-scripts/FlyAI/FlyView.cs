@@ -56,10 +56,10 @@ namespace FlyAI
         public void Apply(BackendMessage m)
         {
             if (m.pos == null || m.pos.Length != 3) return;
-            targetPos = RoomLoader.ToUnity(m.pos[0], m.pos[1], m.pos[2]);
+            targetPos = new Vector3(m.pos[0], m.pos[1], m.pos[2]);   // already Unity world space
             if (m.heading != null && m.heading.Length == 3)
             {
-                var h = RoomLoader.ToUnity(m.heading[0], m.heading[1], m.heading[2]);
+                var h = new Vector3(m.heading[0], m.heading[1], m.heading[2]);
                 if (h.sqrMagnitude > 0.0001f) heading = h.normalized;
             }
             state = m.state;

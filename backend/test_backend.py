@@ -40,6 +40,35 @@ def unit_tests():
         if s == "landed" and g5.state == "flying": moves += 1
     check(moves >= 2, f"idle fly hops between spots ({moves} hops in 20 s)")
 
+def regression_tests():
+    print("regressions found in review")
+    g = FlyGame(random.Random(1)); g.set_room(SPOTS, [0, 1.6, 0])
+    check(g.head == [0, 1.6, 0], "room head is kept after set_room")
+    # Unity is left-handed: a fly facing +z has +x on its right.
+    g = FlyGame(random.Random(1)); g.set_room(SPOTS); g.pos = [1.6, 1.0, 2.0]; g.spot = 2; g.heading = [0, 0, 1]
+    g.tip = [2.2, 1.0, 2.0]
+    check(g.looming()[1] == "right", "swatter on +x of a fly facing +z is on its right")
+    g.tip = [1.0, 1.0, 2.0]
+    check(g.looming()[1] == "left", "swatter on -x of a fly facing +z is on its left")
+    for side, sign in (("right", 1), ("left", -1)):
+        g = FlyGame(random.Random(1)); g.set_room(SPOTS); g.pos = [1.6, 1.0, 2.0]; g.spot = 2
+        g.set_pose([1.6, 1.6, 0.8], [0, -0.4, 1], reach=1.0); g.on_escape(0.9, side)   # tip in front of the fly, so it jumps away along +z
+        check(g.target is not None and (g.target[0] - g.pos[0]) * sign > 0, f"escape '{side}' jumps to the fly's {side}")
+    g = FlyGame(random.Random(1)); g.set_room(SPOTS); g.pos = [1.6, 1.0, 2.0]; g.spot = 2
+    g.set_pose([1.6, 1.6, 0.8], [0, -0.4, 1]); g.on_escape(0.9, "right"); first = list(g.target)
+    for _ in range(20): g.on_escape(0.9, "right")
+    check(g.target == first and g.escapes == 1, "repeated escape replies do not change the target mid-flight")
+    for bad in ({"landingSpots": [{"position": [0, None, 2]}]}, {"landingSpots": "x"}):
+        g = FlyGame(); g.set_room(bad.get("landingSpots"), [0, 1.6, 0]); g.snapshot()
+    ok = True
+    for call in (lambda g: g.set_pose([0, 1], [0, 0, 1]), lambda g: g.set_pose([0, 1, float("nan")], [0, 0, 1]),
+                 lambda g: g.swing("x", [0, 0, 1], 1)):
+        g = FlyGame(); g.set_room(SPOTS, [0, 1.6, 0])
+        try: call(g); ok = False
+        except ValueError: pass
+        g.snapshot()
+    check(ok and g.head == [0, 1.6, 0], "bad vectors are rejected and leave the game state intact")
+
 async def end_to_end():
     print("end to end (brain + backend + fake Unity)")
     py = sys.executable
@@ -61,12 +90,16 @@ async def end_to_end():
             except ws.ConnectionClosed: pass
         pump_task = asyncio.ensure_future(pump())
         hello = await asyncio.wait_for(q.get(), 3); check(hello["type"] == "hello", "server says hello")
+        for bad in ('{"type":"room","landingSpots":[{"position":[0,null,2]}],"head":[0,1.6,0]}',
+                    '{"type":"pose","head":[0,1],"aim":[0,0,1]}', '[1,2]', '{"type":"swing"}', 'not json', '{"type":"pose"}'):
+            await sock.send(bad)
         await sock.send(json.dumps({"type": "room", "landingSpots": SPOTS, "head": [0, 1.6, 0]}))
         fly = None; t0 = time.time(); frames = 0
         while time.time() - t0 < 1.5:
             m = await asyncio.wait_for(q.get(), 2)
             if m["type"] == "fly": fly = m; frames += 1
-        check(fly is not None and frames >= 30, f"fly state streams (~{frames/1.5:.0f} Hz)")
+        check(fly is not None and frames >= 30, f"fly state streams after malformed messages (~{frames/1.5:.0f} Hz)")
+        check(back.poll() is None, "backend is still running after malformed messages")
         # Swing the swatter at the fly rapidly and bring the tip close to provoke an escape.
         pos = fly["pos"]; events = []; t0 = time.time(); tip_z = 0.2
         while time.time() - t0 < 4:
@@ -99,5 +132,6 @@ async def end_to_end():
         back.terminate(); brain.terminate()
 
 unit_tests()
+regression_tests()
 asyncio.run(end_to_end())
 print("FAILED: " + ", ".join(FAIL) if FAIL else "all passed"); sys.exit(1 if FAIL else 0)

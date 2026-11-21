@@ -16,6 +16,18 @@ FLY_SPEED = 1.4         # m/s, idle hop between spots
 ESCAPE_SPEED = 4.5      # m/s at escape strength 1
 
 
+def vec3(v):
+    """A list of 3 finite floats, or ValueError. Keeps bad client data out of game state."""
+    if not isinstance(v, (list, tuple)) or len(v) != 3:
+        raise ValueError("expected 3 numbers")
+    out = []
+    for x in v:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+            raise ValueError("expected finite numbers")
+        out.append(float(x))
+    return out
+
+
 def _sub(a, b): return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 def _add(a, b): return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 def _mul(a, k): return [a[0] * k, a[1] * k, a[2] * k]
@@ -59,13 +71,22 @@ class FlyGame:
 
     # ---- inputs from the client ---------------------------------------
     def set_room(self, spots, head=None):
-        self.spots = [s for s in spots if len(s.get("position", [])) == 3]
-        if head:
-            self.head = list(head)
+        good = []
+        for s in spots if isinstance(spots, list) else []:
+            try:
+                good.append({"id": str(s.get("id", "")), "position": vec3(s.get("position")),
+                             "normal": vec3(s.get("normal", [0, 1, 0]))})
+            except (ValueError, AttributeError):
+                continue
+        self.spots = good
         self.reset()
+        if head is not None:
+            self.head = vec3(head)
 
     def set_pose(self, head, aim, reach=SWAT_REACH, dt=1.0 / TICK_HZ):
-        self.head = list(head)
+        head, aim = vec3(head), vec3(aim)
+        reach = float(reach) if isinstance(reach, (int, float)) and math.isfinite(reach) else SWAT_REACH
+        self.head = head
         tip = _add(head, _mul(_unit(aim), reach))
         if self.tip is not None and dt > 0:
             self.tip_speed = _len(_sub(tip, self.tip)) / dt
@@ -73,6 +94,8 @@ class FlyGame:
 
     def swing(self, origin, direction, strength, reach=SWAT_REACH):
         """Returns True if the fly was squished."""
+        origin, direction = vec3(origin), vec3(direction)
+        reach = float(reach) if isinstance(reach, (int, float)) and math.isfinite(reach) else SWAT_REACH
         self.swings += 1
         if self.state in ("dead", "idle"):
             return False
@@ -97,20 +120,22 @@ class FlyGame:
         closeness = 1.0 - d / LOOM_RANGE
         motion = min(1.0, 0.25 + self.tip_speed / 3.0)
         value = max(0.0, min(1.0, closeness * motion * 1.6))
-        # Which eye sees it: sign of the swatter relative to the fly's heading.
-        cross_y = self.heading[2] * to_tip[0] - self.heading[0] * to_tip[2]
-        side = "left" if cross_y > 0.05 else "right" if cross_y < -0.05 else "center"
+        # Which eye sees it. Unity is left-handed: right = up x forward = (fwd.z, 0, -fwd.x).
+        across = self.heading[2] * to_tip[0] - self.heading[0] * to_tip[2]   # > 0: swatter on the fly's right
+        side = "right" if across > 0.05 else "left" if across < -0.05 else "center"
         return value, side
 
     def on_escape(self, strength, side):
         """Brain reply. `side` is the direction the fly jumps."""
-        if self.state in ("dead", "idle") or strength < 0.3 or not self.spots:
+        # Ignore escapes mid-flight: replies arrive at 20 Hz and would flip the target every time.
+        if self.state in ("dead", "idle", "fleeing") or strength < 0.3 or not self.spots:
             return
         away = _sub(self.pos, self.tip if self.tip else self.head)
         away[1] = 0.0
         away = _unit(away)
-        # Turn the jump toward the brain's chosen side (+/-35 degrees).
-        ang = math.radians(35) * (1 if side == "right" else -1)
+        # Turn the jump toward the brain's chosen side (+/-35 degrees). In Unity a positive
+        # angle in this formula turns toward -x (left), so "right" is negative.
+        ang = math.radians(35) * (-1 if side == "right" else 1)
         c, s = math.cos(ang), math.sin(ang)
         want = _unit([away[0] * c - away[2] * s, 0.0, away[0] * s + away[2] * c])
         best, best_score = None, -9.0

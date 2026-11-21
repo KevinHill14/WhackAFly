@@ -28,16 +28,17 @@ class Backend:
         self.brain_url = brain_url
         self.clients = set()
         self.brain = None
-        self.pending = False
         self.last_pose = time.monotonic()
 
     async def send_all(self, msg):
         text = json.dumps(msg, separators=(",", ":"))
         for c in list(self.clients):
             try:
-                await c.send(text)
-            except ws.ConnectionClosed:
+                # A stalled client must not hold up the game for everyone else.
+                await asyncio.wait_for(c.send(text), 0.25)
+            except (ws.ConnectionClosed, asyncio.TimeoutError, OSError):
                 self.clients.discard(c)
+                await c.close()
 
     # ---- Unity connection ----------------------------------------------
     async def on_client(self, sock, path):
@@ -47,8 +48,15 @@ class Backend:
                                     "brain": self.brain is not None}))
         try:
             while True:
-                await self.handle(json.loads(await sock.recv()))
-        except (ws.ConnectionClosed, json.JSONDecodeError):
+                try:
+                    msg = json.loads(await sock.recv())
+                    if isinstance(msg, dict):
+                        await self.handle(msg)
+                except json.JSONDecodeError:
+                    continue
+                except (ValueError, KeyError, TypeError, AttributeError) as e:
+                    print(f"[backend] ignored bad message: {e!r}")
+        except ws.ConnectionClosed:
             pass
         finally:
             self.clients.discard(sock)
@@ -83,6 +91,8 @@ class Backend:
                     m = json.loads(data.decode())
                 except (ValueError, UnicodeDecodeError):
                     return
+                if not isinstance(m, dict):
+                    return
                 m["type"] = "swatter"       # forwarded to Unity unchanged otherwise
                 asyncio.ensure_future(backend.send_all(m))
         return Proto()
@@ -90,43 +100,53 @@ class Backend:
     # ---- brain ----------------------------------------------------------
     async def brain_loop(self):
         while True:
+            sock = None
             try:
-                self.brain = await ws.connect(self.brain_url)
+                sock = await ws.connect(self.brain_url)
+                self.brain = sock
                 print(f"[backend] brain connected at {self.brain_url}")
                 while True:
-                    m = json.loads(await self.brain.recv())
-                    if m.get("type") == "escape":
-                        self.pending = False
+                    m = json.loads(await sock.recv())
+                    if isinstance(m, dict) and m.get("type") == "escape":
                         self.game.spikes = m.get("spikes")
-                        self.game.on_escape(m.get("strength", 0.0), m.get("side", "right"))
-            except (ws.ConnectionClosed, ConnectionError, OSError, asyncio.TimeoutError, ValueError):
+                        self.game.on_escape(float(m.get("strength", 0.0)), m.get("side", "right"))
+            except Exception as e:      # a brain problem must never stop the game
+                if not isinstance(e, (ws.ConnectionClosed, ConnectionError, OSError, asyncio.TimeoutError)):
+                    print(f"[backend] brain error: {e!r}")
+            finally:
                 self.brain = None
-                self.pending = False
-                await asyncio.sleep(2)
+                if sock is not None:
+                    await sock.close()
+            await asyncio.sleep(2)
 
     async def looming_loop(self):
         while True:
             await asyncio.sleep(1 / LOOMING_HZ)
-            value, side = self.game.looming()
-            if self.brain is not None:
-                try:
+            try:
+                value, side = self.game.looming()
+                if self.brain is not None:
                     await self.brain.send(json.dumps({"type": "looming", "value": value, "side": side}))
-                except ws.ConnectionClosed:
-                    self.brain = None
-            elif value > 0.6:
-                # No brain: crude fallback so the game still plays.
-                self.game.on_escape(min(1.0, value), "left" if side == "right" else "right")
+                elif value > 0.6:
+                    # No brain: crude fallback so the game still plays.
+                    self.game.on_escape(min(1.0, value), "left" if side == "right" else "right")
+            except ws.ConnectionClosed:
+                self.brain = None
+            except Exception as e:
+                print(f"[backend] looming loop error: {e!r}")
 
     async def tick_loop(self):
         period = 1 / TICK_HZ
         nxt = time.monotonic()
         while True:
             nxt += period
-            self.game.tick(period)
-            if self.clients:
-                await self.send_all(self.game.snapshot())
-                for e in self.game.events:
-                    await self.send_all({"type": "event", **e})
+            try:
+                self.game.tick(period)
+                if self.clients:
+                    await self.send_all(self.game.snapshot())
+                    for e in self.game.events:
+                        await self.send_all({"type": "event", **e})
+            except Exception as e:
+                print(f"[backend] tick error: {e!r}")
             self.game.events.clear()
             await asyncio.sleep(max(0.0, nxt - time.monotonic()))
 
