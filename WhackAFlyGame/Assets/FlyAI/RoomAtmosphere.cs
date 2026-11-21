@@ -34,6 +34,7 @@ namespace FlyAI
         const float DefaultChairLength = 0.6f;
 
         public static RoomAtmosphere Current { get; private set; }
+        public IReadOnlyList<LightRig> Rigs => rigs;
         public static bool FogEnabled { get; private set; } = true;
 
         readonly List<LightRig> rigs = new List<LightRig>();

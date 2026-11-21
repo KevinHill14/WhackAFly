@@ -215,6 +215,7 @@ namespace FlyAI
                 root.GetComponent<RoomAtmosphere>().MakeCurrent();
                 root.GetComponent<RoomEvents>().MakeCurrent();
                 root.GetComponent<RoomTension>().MakeCurrent();
+                FlyAgent.Spawn(root.transform, room);
                 failedScanKey = null;
                 if (currentRoot != null) Destroy(currentRoot);
                 currentImport?.Dispose();

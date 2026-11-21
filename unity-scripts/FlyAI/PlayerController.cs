@@ -25,13 +25,18 @@ namespace FlyAI
         const float BodyHeight = 1.75f;
         const float BodyRadius = 0.25f;
         const float MaxAimYaw = 28f;
-        const float MaxAimPitch = 70f;
+        const float MaxAimPitch = 84f;
         const float ViewPitchShare = 0.65f;
         const float SwingDuration = 0.18f;
         const float SwingCooldown = 0.35f;
         const float GroundClearance = 0.03f;
         const float MaxMoveStep = 0.05f;
         const float StepLength = 0.74f;
+        const float SneakSpeedScale = 0.4f;
+        const int SwatterGrowthStep = 1000;
+        const float BaseSwatReach = 2f;
+        const float BaseSwatRadius = 0.12f;
+        const float SneakStepVolume = 0.05f;
         const float HitStopSeconds = 0.055f;
         const float PopupSeconds = 1.1f;
         const int WindowCost = 2500;
@@ -44,6 +49,37 @@ namespace FlyAI
 
         public event Action<SwingResult> Swung;
         public int DamageBill { get; private set; }
+        public float SwatterScale { get; private set; } = 1f;
+        string swatterGrewNote = "";
+        public bool Sneaking { get; private set; }
+        public Light Flashlight { get; private set; }
+        public Transform Head => head;
+        public Transform SwatterTransform => swatter;
+        // Every $1000 of damage makes the swatter 10% bigger than the original: reach, width and the model.
+        void UpdateSwatterSize(bool announce)
+        {
+            var scale = 1f + 0.1f * (DamageBill / SwatterGrowthStep);
+            if (Mathf.Approximately(scale, SwatterScale) && announce) return;
+            var grew = scale > SwatterScale;
+            SwatterScale = scale;
+            swatReach = BaseSwatReach * scale;
+            swatRadius = BaseSwatRadius * scale;
+            if (swatter != null) swatter.localScale = Vector3.one * scale;
+            if (announce && grew) swatterGrewNote = $"  The swatter grew! Now {Mathf.RoundToInt(scale * 100f)}%";
+        }
+
+        public void ToggleFlashlight()
+        {
+            var on = !Flashlight.enabled;
+            Flashlight.enabled = on;
+            var fx = Flashlight.GetComponent<FlashlightFx>();
+            if (fx != null) fx.enabled = on;
+            foreach (Transform child in Flashlight.transform) child.gameObject.SetActive(on); // The visible beam.
+            playerAudio.PlayOneShot(FlySounds.Get("impact_tech"), 0.2f);
+            message = on ? "Flashlight on" : "Flashlight off";
+        }
+
+        public void Announce(string text) => message = text;
 
         readonly Queue<(float time, Quaternion aim)> aimHistory = new Queue<(float, Quaternion)>();
         readonly RaycastHit[] hits = new RaycastHit[48];
@@ -108,6 +144,7 @@ namespace FlyAI
 
             var flashlight = new GameObject("Flashlight").AddComponent<Light>();
             flashlight.transform.SetParent(aimPivot, false);
+            Flashlight = flashlight;
             flashlight.type = LightType.Spot;
             flashlight.range = 9f;
             flashlight.spotAngle = 45f;
@@ -147,6 +184,7 @@ namespace FlyAI
             aimYaw = aimPitch = 0f;
             aimHistory.Clear();
             DamageBill = 0;
+            UpdateSwatterSize(false);
             message = "Find the fly";
             ApplyAim();
         }
@@ -197,7 +235,10 @@ namespace FlyAI
             if (frame.quickTurn) transform.Rotate(0f, 180f, 0f);
             transform.Rotate(0f, frame.turn * turnSpeed * Time.deltaTime, 0f);
 
-            Walk(transform.forward * (frame.forward * walkSpeed), Time.deltaTime);
+            // Hold Left Ctrl to sneak: slow and quiet, and the fly notices you less.
+            Sneaking = Keyboard.current != null && Keyboard.current.leftCtrlKey.isPressed;
+            if (Keyboard.current != null && Keyboard.current.qKey.wasPressedThisFrame) ToggleFlashlight();
+            Walk(transform.forward * (frame.forward * walkSpeed * (Sneaking ? SneakSpeedScale : 1f)), Time.deltaTime);
 
             if (frame.recenter)
             {
@@ -234,7 +275,7 @@ namespace FlyAI
             {
                 stepDistance = 0f;
                 stepIndex = (stepIndex + 1) % 3;
-                playerAudio.PlayOneShot(FlySounds.Get($"footstep_{stepIndex}"), 0.24f);
+                playerAudio.PlayOneShot(FlySounds.Get($"footstep_{stepIndex}"), Sneaking ? SneakStepVolume : 0.24f);
             }
         }
 
@@ -309,6 +350,7 @@ namespace FlyAI
             swingStartedAt = Time.time;
             playerAudio.PlayOneShot(FlySounds.Get("swing_whoosh"), Mathf.Lerp(0.3f, 0.6f, strength));
             var direction = AimBeforeSwing() * Vector3.forward;
+            FlyAgent.Current?.OnSwing(head.position, direction, swatRadius, swatReach, strength);
             var result = new SwingResult { time = Time.time, strength = strength, target = "nothing" };
 
             var count = Physics.SphereCastNonAlloc(head.position, swatRadius, direction, hits, swatReach, ~0, QueryTriggerInteraction.Ignore);
@@ -360,11 +402,14 @@ namespace FlyAI
                 if (prop != null) prop.Hit(result.point, direction, strength);
                 PropDamage.ShakeNearby(result.point, strength, prop);
 
-                // Every object is billed once. Imprints stay free and unlimited.
+                // Every hit is billed. Imprints stay free and unlimited.
                 var cost = window != null ? WindowCost : Mathf.RoundToInt(DamageCost(part) * strength);
                 result.damage = cost;
                 DamageBill += result.damage;
+                UpdateSwatterSize(true);
                 message = result.damage > 0 ? $"Hit {part.label}: -${result.damage}" : $"Hit {part.label}";
+                message += swatterGrewNote;
+                swatterGrewNote = "";
                 if (result.damage > 0)
                     popups.Add(new DamagePopup { point = result.point, text = $"-${result.damage}", born = Time.unscaledTime });
 
@@ -378,6 +423,8 @@ namespace FlyAI
             {
                 message = "Whiff";
             }
+            // Every swing makes a sound the fly can hear: a thud where it lands, or a whoosh if it misses.
+            FlyAgent.Current?.HearNoise(result.hit ? result.point : head.position + direction, result.hit ? Mathf.Lerp(0.35f, 0.7f, strength) : 0.2f);
             Swung?.Invoke(result);
         }
 
@@ -519,7 +566,7 @@ namespace FlyAI
             GUI.Label(new Rect(16, 12, 300, 24), $"Damage bill: ${DamageBill}");
             GUI.Label(new Rect(16, 34, 400, 24), message);
             GUI.Label(new Rect(16, Screen.height - 34, 900, 24),
-                "W/S walk  A/D turn  Mouse aim  Click swing  Space ping  Space x2 turn 180  Hold Space recenter  Tab debug camera");
+                "W/S walk  A/D turn  Hold Ctrl sneak  Q flashlight  Mouse aim  Click swing  Space ping  Space x2 turn 180  Hold Space recenter  Tab debug camera");
 
             var target = view.WorldToScreenPoint(aimPivot.position + aimPivot.forward * swatReach);
             if (target.z > 0f) GUI.Label(new Rect(target.x - 5f, Screen.height - target.y - 11f, 20f, 22f), "+");

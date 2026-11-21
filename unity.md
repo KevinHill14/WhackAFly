@@ -4,7 +4,7 @@
 
 `WhackAFlyGame` loads the latest scanned room and rebuilds it as a dark, playable space. The player walks it in first person with a swatter and flashlight. The room has fog, unreliable lights, generated sound, timed events and breakable props. Swings add to a damage bill.
 
-**The fly is not in this code yet.** See [Where the fly plugs in](#where-the-fly-plugs-in).
+The fly is in: `FlyAgent` models it and `FlyBrainClient` talks to the brain server (`brain/server.py`). See [The fly and the brain](#the-fly-and-the-brain).
 
 ## Open and run
 
@@ -97,6 +97,8 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | Player | `PlayerController` | Movement, aim, flashlight, swings, damage bill, HUD |
 | | `SwatterInput` | Keyboard/mouse input; a real swatter can implement `ISwatterInput` |
 | | `SwatterModel` | The swatter's 3D model |
+| Fly | `FlyAgent` | Fly model, perching and hopping between landing spots, looming from the swatter, escape, swat kill |
+| | `FlyBrainClient` | WebSocket client for the brain server; auto-reconnects |
 | Tools | `FlyCamera` | Free debug camera and all debug keys |
 | | `Editor/FlyAITextureImport` | Keeps texture import settings correct |
 
@@ -110,6 +112,8 @@ If a load fails, the error is logged once as `[FlyAI] Scan load failed` and the 
 | `A` / `D` | Turn left / right |
 | Mouse | Aim swatter and flashlight |
 | Left click | Swing; faster mouse movement means a stronger hit. Also recaptures the cursor |
+| `Q` | Flashlight on/off |
+| Hold `Left Ctrl` | Sneak: 40% speed, near-silent footsteps, and the fly is much less likely to notice you |
 | `Space` tap | Ping: briefly clears the fog |
 | `Space` double tap | Turn 180 degrees |
 | `Space` hold 0.6 s | Recentre aim |
@@ -201,39 +205,43 @@ A model whose filename matches the type needs no extra code. A missing model log
 
 Replace the files in `Assets/FlyAI/Art/Resources/FlyAITextures/`. Sets are `Wall`, `Floor`, `Ceiling` and `Wood`, each with `_Color` and `_Normal`. Keep the names. Change the tile size in `TileSize` in `RoomSurfaces.cs`. A missing colour map falls back to the flat theme colour.
 
-## Where the fly plugs in
+## The fly and the brain
 
-**Required: report distance every frame.**
+Start the brain first (`pip install numpy`, then `python brain/server.py`; see `brain/README.md`), then press Play. It connects to `ws://127.0.0.1:8765`. Set `FLYAI_BRAIN` to another URL, or to `off` to skip the server. The Console logs `[FlyAI] Fly brain: connecting to ...`. The bottom-left text shows LIVE or stand-in, the looming value, the brain's escape strength and side, and Giant Fiber spikes. `J` hides it.
 
-```csharp
-if (RoomTension.Current != null)
-    RoomTension.Current.SetFlyDistance(
-        Vector3.Distance(fly.position, Camera.main.transform.position));
-```
+How it works: the brain controls the fly, and the game only supplies what the fly sees and forces where it may land.
 
-Tension starts at 5 m and peaks at 0.8 m. If calls stop for 0.25 s, tension fades out.
+1. **In:** `FlyAgent` turns the swatter, the player walking at it, the flashlight beam and occasional passing shadows into a looming value (0-1) and the eye that sees it. `FlyBrainClient` sends it to the brain at 20 Hz.
+2. **Out:** the brain answers with an escape strength and a jump side.
+   - Strength 0.4 or more: the fly takes off. The side sets its first turn, and the strength sets its speed and how many waypoints the flight has.
+   - Strength 0.12 to 0.4: the fly walks away from the threat, toward the side the brain chose.
+3. **Game rules:** the fly only lands on furniture spots (table, seat, ledge, storage, bed, object), never the ceiling. It walks between neighbouring spots on a surface, perches, grooms, and flies routes through open air. A swing lands 0.12 s after it starts, so a quick escape dodges it.
+4. **No server, no reaction.** There is no stand-in. If the brain is off or disconnected the fly does not react, and the panel says so in red.
+5. **Raspberry Pi:** run `brain/server.py` on the Pi and set `FLYAI_BRAIN=ws://<pi-ip>:8765` before launching Unity.
 
-**Landing spots.** `room.json` has `landingSpots`, each with a position, surface normal and surface kind. Convert with `RoomLoader.ToUnity(...)`. The spots keep the fly in bounds and within swatter reach; the brain chooses among them.
+The brain only models the looming-to-escape circuit, so walking and grooming are game code. The brain decides when the fly takes off, which way it goes, and when it walks away.
 
-These hooks do not exist yet and will need small additions:
+The panel at the top right shows the connection, the stimulus, the brain's strength and side, and spike counts for the eye inputs, the Giant Fiber and the escape neurons. `J` hides it.
 
-| Need | Current state |
-|---|---|
-| Get room data | `RoomLoader` keeps it private; add a public property, or read `room.json` |
-| Know when a room loads | No event; add one to `RoomLoader` |
-| Detect a swat on the fly | `Swing` ignores colliders without `RoomPart`, so a plain fly collider is never hit |
-| Swing details | `PlayerController.Swung` has a hit point but no origin or direction, and no point on a miss |
-| Damage | Tagging the fly as a `RoomPart` would add it to the damage bill unless handled |
+Light and events change what the fly sees. The panel's Light line shows the light at the fly, its vision (0.12 in the dark, 1.0 when well lit) and the flashlight beam on it.
+- **Vision:** swatter, player and shadow stimuli are scaled by vision. The fly sees by the lamps and flashlight at its own spot, or the lamps on the threat. Walls and furniture block most lamp light. A blackout leaves it nearly blind.
+- **Flashlight on the fly** is a restless stimulus (up to 0.4), and passing shadows come faster while it is lit.
+- **Events:** a power surge floods it with looming that flicks between eyes. Lightning and headlights add looming from the window side. Lights cutting out give one startle.
+- **Sounds:** a swing landing, a swing missing and glass breaking (`HearNoise`) become looming pulses from where the sound came from, scaled by distance (8 m, glass 14 m). The brain then decides whether the fly bolts. Sounds work in the dark.
+
+Finding it: the buzz is loud in flight and muffled when the fly is behind you, so you can turn toward it by ear. A perched fly gives a short buzz every 3-6 s. About 1 s after it lands, a light blue marker and glow slowly brighten over 7 s; the marker sits on the fly, or at the screen edge with an arrow when it is off screen. It goes dark again when the fly takes off. `BeaconDelay` and `BeaconRamp` in `FlyAgent.cs` set the timing. The fly also reports its distance to `RoomTension` every frame. Tuning constants are at the top of `FlyAgent.cs`.
 
 ## Known limitations
 
-- The fly and win/lose flow are not implemented.
+- Win/lose flow is minimal: a squashed fly shows a message, and `R` reloads the room.
+- The fly has one hop-and-perch behaviour and no crawling. Its swat check ignores walls and furniture in between.
 - There is no menu, and only one theme.
 - `L` swaps props, sounds and markers only. Lights stay from the layout that was loaded.
 - Landing spots do not update when props are knocked over or shattered.
 - Candles and scanned-window lights ignore blackouts and surges.
 - Only the room's main window can smash. Any other scanned window is a normal object.
 - Generated doors have no collider, so swings hit the wall behind them.
+- The swatter (reach, width and model) grows 10% of the original for every $1000 of damage, with no cap. `SwatterGrowthStep` in `PlayerController.cs` sets the step.
 - Every hit on an object is billed, so repeat swings add up. Imprints never add to the bill.
 - Standalone builds are untested. Shaders are looked up by name at runtime and may be stripped from a build.
 

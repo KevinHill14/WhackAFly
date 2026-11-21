@@ -70,6 +70,8 @@ namespace FlyAI
         float quietUntil;
 
         public float Surge { get; private set; }
+        public float LightningLevel => lightningLevel;
+        public float HeadlightLevel => headlightLift;
         public bool CalmLights => surgeActive;
         public float LightBoost => 1f + Surge * SurgeBrightness;
         public float FogLift => Mathf.Max(Surge, Mathf.Max(headlightLift * HeadlightFogLift, lightningLevel * LightningFogLift));

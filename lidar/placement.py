@@ -122,7 +122,6 @@ CLOCK_HEIGHT = 1.9
 LANDING_RULES = {
     "table": (6.0, 40, 0.18), "seat": (12.0, 4, 0.14), "ledge": (20.0, 3, 0.14), "storage": (5.0, 15, 0.18),
     "bed": (3.0, 15, 0.25), "object": (5.0, 6, 0.18), "floor": (0.8, 120, 0.60), "wall": (1.0, 40, 0.45),
-    "ceiling": (0.5, 60, 0.60),
 }
 MAX_LANDING_SPOTS = 400
 LANDING_RADIUS = 0.025

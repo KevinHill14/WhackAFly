@@ -16,7 +16,7 @@ namespace FlyAI
             "dishwasher_slosh", "oven_tick", "fire_crackle", "toilet_drip", "wind_outside", "rain_outside",
             "surge_whine", "light_buzz", "car_pass", "thunder", "footstep_0", "footstep_1", "footstep_2", "swing_whoosh",
             "impact_wood", "impact_wall", "impact_glass", "impact_ceramic", "impact_metal", "impact_tech", "impact_soft",
-            "impact_squish", "window_smash",
+            "impact_squish", "window_smash", "fly_buzz",
         };
 
         public static AudioClip Get(string name)
@@ -65,6 +65,7 @@ namespace FlyAI
                 case "impact_soft": return Impact(0.17f, 110f, 34f, 0.3f, 18, 1f);
                 case "impact_squish": return Squish();
                 case "window_smash": return WindowSmash();
+                case "fly_buzz": return FlyBuzz();
                 default: return null;
             }
         }
@@ -300,6 +301,22 @@ namespace FlyAI
             }
             for (var i = 0; i < data.Length; i++) data[i] = (float)Math.Tanh(data[i] * 1.2f);
             return Normalize(data, 0.9f);
+        }
+
+        // A loop of wing buzz: whole cycles per half-second so it repeats without a click.
+        static float[] FlyBuzz()
+        {
+            var data = New(0.5f);
+            var random = new System.Random(77);
+            for (var i = 0; i < data.Length; i++)
+            {
+                var t = i / (float)Rate;
+                var wobble = 1f + 0.08f * Mathf.Sin(2f * Mathf.PI * 8f * t);
+                var tone = Mathf.Sin(2f * Mathf.PI * 190f * t) * 0.5f + Mathf.Sin(2f * Mathf.PI * 380f * t) * 0.3f
+                           + Mathf.Sin(2f * Mathf.PI * 570f * t) * 0.18f + Mathf.Sin(2f * Mathf.PI * 760f * t) * 0.08f;
+                data[i] = tone * wobble * (0.8f + 0.2f * Mathf.Sin(2f * Mathf.PI * 4f * t)) + Noise(random) * 0.05f;
+            }
+            return Normalize(data, 0.5f);
         }
 
         static float[] LightBuzz()
