@@ -13,19 +13,26 @@ import json
 import math
 import os
 import re
+import secrets
 import struct
+import time
+import traceback
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 
 import numpy as np
 
-from placement import NOT_A_SURFACE, SCANNED_SOUNDS, SURFACE_CLASS, ceiling_triangles, place_items
+from placement import MAX_WALK_CELLS, NOT_A_SURFACE, SCANNED_SOUNDS, SURFACE_CLASS, ceiling_triangles, part_role, place_items
 
 MAX_GLB_BYTES = 300 * 1024 * 1024
 GROUPS = {"Walls", "Floors", "Ceilings", "Furniture", "Objects"}
 COMPONENT_TYPES = {5120: "<i1", 5121: "<u1", 5122: "<i2", 5123: "<u2", 5125: "<u4", 5126: "<f4"}
 TYPE_SIZES = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
 PLAYER_EYE_HEIGHT = 1.6
+MIN_FLOOR_AREA = 1.0
+BAD_SCAN_ERRORS = (zipfile.BadZipFile, KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError,
+                   ZeroDivisionError, RecursionError, RuntimeError, NotImplementedError, EOFError, struct.error, zlib.error)
 
 
 class ScanError(ValueError):
@@ -65,8 +72,8 @@ def parse_glb(data):
         elif kind == b"BIN\0":
             blob = chunk
         offset += 8 + size
-    if gltf is None:
-        raise ScanError("The GLB has no JSON chunk.")
+    if not isinstance(gltf, dict):
+        raise ScanError("The GLB has no valid JSON chunk.")
     if gltf.get("extensionsRequired"):
         raise ScanError(f"Unsupported GLB extensions: {gltf['extensionsRequired']}")
     return gltf, blob
@@ -92,8 +99,11 @@ def read_accessor(gltf, blob, index):
     components = TYPE_SIZES[accessor["type"]]
     stride = view.get("byteStride") or base.itemsize * components
     offset = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
-    layout = np.dtype({"names": ["v"], "formats": [(base, (components,))], "offsets": [0], "itemsize": stride})
-    return np.frombuffer(blob, layout, accessor["count"], offset)["v"].reshape(accessor["count"], components).copy()
+    count = accessor["count"]
+    element = base.itemsize * components
+    if count < 0 or offset < 0 or stride < element or offset + max(count - 1, 0) * stride + element > len(blob):
+        raise ScanError("The scan has a broken data accessor.")
+    return np.ndarray((count, components), dtype=base, buffer=blob, offset=offset, strides=(stride, base.itemsize)).copy()
 
 
 def node_matrix(node):
@@ -112,7 +122,7 @@ def node_matrix(node):
 
 
 def collect_parts(gltf, blob):
-    parts, seen = [], set()
+    parts, seen, names = [], set(), Counter()
 
     def walk(index, parent, group):
         if index in seen:
@@ -120,7 +130,9 @@ def collect_parts(gltf, blob):
         seen.add(index)
         node = gltf["nodes"][index]
         world = parent @ node_matrix(node)
-        name = node.get("name", f"node_{index}")
+        name = node.get("name")
+        if not isinstance(name, str) or not name:
+            name = f"node_{index}"
         group = name if name in GROUPS else group
         if "mesh" in node:
             vertices, triangles, material, base = [], [], None, 0
@@ -132,6 +144,8 @@ def collect_parts(gltf, blob):
                     faces = read_accessor(gltf, blob, primitive["indices"]).reshape(-1, 3).astype(np.int64)
                 else:
                     faces = np.arange(len(points)).reshape(-1, 3)
+                if len(faces) and (faces.min() < 0 or faces.max() >= len(points)):
+                    raise ScanError("The scan has broken triangle indices.")
                 vertices.append(points)
                 triangles.append(faces + base)
                 base += len(points)
@@ -139,10 +153,15 @@ def collect_parts(gltf, blob):
             if vertices:
                 local = np.vstack(vertices)
                 points = (world[:3, :3] @ local.T).T + world[:3, 3]
+                if not np.isfinite(points).all():
+                    raise ScanError("The scan contains invalid coordinates.")
                 faces = np.vstack(triangles)
                 if np.linalg.det(world[:3, :3]) < 0:
                     faces = faces[:, ::-1]
-                parts.append(dict(name=name, group=group, vertices=points, faces=faces, material=material))
+                # Many steps look parts up by name, so repeated names must become unique.
+                names[name] += 1
+                unique = name if names[name] == 1 else f"{name}#{names[name]}"
+                parts.append(dict(name=unique, group=group, vertices=points, faces=faces, material=material))
         for child in node.get("children", []):
             walk(child, world, group)
 
@@ -290,11 +309,28 @@ def trace_outer(neighbours, component):
 
         following = min(neighbours[current], key=lambda q: (turn(q), q))
         if following == start:
-            return np.array(path, float) / 1000
+            return path
         heading = (following[0] - current[0], following[1] - current[1])
         path.append(following)
         current = following
     return None
+
+
+def split_at_repeats(path):
+    """Floors touching at one corner trace as a figure eight; separate the loops."""
+    loops, stack, positions = [], [], {}
+    for point in path:
+        if point in positions:
+            start = positions[point]
+            loops.append(stack[start:])
+            for removed in stack[start + 1:]:
+                del positions[removed]
+            stack = stack[:start + 1]
+        else:
+            positions[point] = len(stack)
+            stack.append(point)
+    loops.append(stack)
+    return [loop for loop in loops if len(loop) >= 3]
 
 
 def floor_outline(floors):
@@ -312,9 +348,9 @@ def floor_outline(floors):
                     component.add(other)
                     stack.append(other)
         remaining -= component
-        loop = trace_outer(neighbours, component)
-        if loop is not None and len(loop) >= 3:
-            loops.append(loop)
+        path = trace_outer(neighbours, component)
+        if path is not None:
+            loops.extend(np.array(loop, float) / 1000 for loop in split_at_repeats(path))
 
     if loops:
         polygon = max(loops, key=lambda p: abs(polygon_area(p)))
@@ -357,8 +393,9 @@ def choose_player_start(polygon, objects):
     low, high = polygon.min(0), polygon.max(0)
     obstacles = [(np.array([o["position"][0], o["position"][2]]), math.hypot(o["size"][0], o["size"][2]) / 2) for o in objects]
     best, best_score = None, -1.0
-    for x in np.arange(low[0], high[0], 0.25):
-        for z in np.arange(low[1], high[1], 0.25):
+    step = max(0.25, math.sqrt(float(np.prod(high - low)) / MAX_WALK_CELLS))
+    for x in np.arange(low[0], high[0], step):
+        for z in np.arange(low[1], high[1], step):
             if not inside(polygon, x, z):
                 continue
             point = np.array([x, z])
@@ -379,10 +416,13 @@ def rounded(values, digits=3):
 
 
 def material_hex(gltf, index):
-    if index is None:
+    materials = gltf.get("materials")
+    if not isinstance(index, int) or not isinstance(materials, list) or not 0 <= index < len(materials):
         return None
-    factor = gltf.get("materials", [])[index].get("pbrMetallicRoughness", {}).get("baseColorFactor")
-    if not factor:
+    material = materials[index]
+    pbr = material.get("pbrMetallicRoughness") if isinstance(material, dict) else None
+    factor = pbr.get("baseColorFactor") if isinstance(pbr, dict) else None
+    if not isinstance(factor, list) or len(factor) < 3 or not all(isinstance(c, (int, float)) for c in factor[:3]):
         return None
 
     def to_srgb(c):
@@ -393,7 +433,7 @@ def material_hex(gltf, index):
 
 
 def build_room(gltf, parts):
-    floors = [p for p in parts if p["group"] == "Floors" or p["name"].lower().startswith("floor")]
+    floors = [p for p in parts if part_role(p) == "floor"]
     if not floors:
         raise ScanError("No labelled floor found. Scan with Polycam Floorplan mode.")
     floor_ids = {id(p) for p in floors}
@@ -404,12 +444,11 @@ def build_room(gltf, parts):
 
     walls, objects, ceiling_heights = [], [], []
     for part in parts:
-        name, group = part["name"], part["group"]
-        lowered = name.lower()
+        name, role = part["name"], part_role(part)
         vertices = part["vertices"] + offset
-        if lowered.startswith("joint") or id(part) in floor_ids:
+        if role == "joint" or id(part) in floor_ids:
             continue
-        if group == "Ceilings" or lowered.startswith("ceiling"):
+        if role == "ceiling":
             faces = ceiling_triangles(vertices, part["faces"])
             if len(faces):
                 sides = np.cross(faces[:, 1] - faces[:, 0], faces[:, 2] - faces[:, 0])
@@ -418,7 +457,9 @@ def build_room(gltf, parts):
         label = normalize_label(name)
         box_centre, axis, length, width = oriented_box(vertices)
         top = float(vertices[:, 1].max())
-        if (group == "Walls" or lowered.startswith("wall")) and label not in NOT_A_SURFACE:
+        if role == "wall" and label not in NOT_A_SURFACE:
+            if top <= 0:
+                continue
             walls.append({
                 "node": name,
                 "start": rounded(box_centre - axis * length / 2),
@@ -441,6 +482,10 @@ def build_room(gltf, parts):
     if not walls:
         raise ScanError("No labelled walls found. Scan with Polycam Floorplan mode.")
     ceiling = max(ceiling_heights) if ceiling_heights else max(w["height"] for w in walls)
+    if ceiling <= 0:
+        raise ScanError("The scan appears to be upside down.")
+    if abs(polygon_area(polygon)) < MIN_FLOOR_AREA:
+        warnings.append("The floor is unusually small; check the scan.")
     outline = [rounded(p) for p in polygon]
     room = {
         "units": "m",
@@ -471,14 +516,26 @@ def recentre_glb(gltf, blob, offset):
 
 
 def replace_file(path, data):
-    temporary = path + ".tmp"
+    temporary = f"{path}.{os.getpid()}.{secrets.token_hex(3)}.tmp"
     with open(temporary, "wb") as handle:
         handle.write(data)
-    os.replace(temporary, path)
+    try:
+        # On Windows the swap briefly fails while Unity is reading the file.
+        for attempt in range(20):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def write_room(path, room):
-    replace_file(path, json.dumps(room, indent=1).encode("utf-8"))
+    replace_file(path, json.dumps(room, indent=1, allow_nan=False).encode("utf-8"))
 
 
 def process_scan(input_path, out_dir, ai=False):
@@ -486,16 +543,18 @@ def process_scan(input_path, out_dir, ai=False):
         raw = read_input(input_path)
         gltf, blob = parse_glb(raw)
         parts = collect_parts(gltf, blob)
+        if not parts:
+            raise ScanError("The scan has no meshes.")
+        room, offset = build_room(gltf, parts)
+        seed = int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
+        layout, context = place_items(parts, room, offset, seed)
+        room.update(layout)
+        json.dumps(room, allow_nan=False)
     except ScanError:
         raise
-    except (zipfile.BadZipFile, KeyError, IndexError, TypeError, ValueError) as error:
+    except BAD_SCAN_ERRORS as error:
+        traceback.print_exc()
         raise ScanError(f"Could not read this scan: {error}") from error
-    if not parts:
-        raise ScanError("The scan has no meshes.")
-    room, offset = build_room(gltf, parts)
-    seed = int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
-    layout, context = place_items(parts, room, offset, seed)
-    room.update(layout)
     room["layoutSource"] = "rules"
     os.makedirs(out_dir, exist_ok=True)
     replace_file(os.path.join(out_dir, "scan.glb"), recentre_glb(gltf, blob, offset))

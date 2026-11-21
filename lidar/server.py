@@ -16,7 +16,7 @@ import traceback
 import qrcode
 from aiohttp import web
 
-from ingest import ALLOWED, SCANS, UPLOADS, new_scan_id, publish
+from ingest import ALLOWED, SCANS, UPLOADS, discard, new_scan_id, publish
 from process_scan import MAX_GLB_BYTES, ScanError, process_scan
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
@@ -44,7 +44,7 @@ def lan_ip():
 
 
 def authorised(request):
-    return hmac.compare_digest(request.query.get("token", ""), request.app["token"])
+    return hmac.compare_digest(request.query.get("token", "").encode("utf-8"), request.app["token"].encode("utf-8"))
 
 
 async def index(request):
@@ -76,7 +76,9 @@ async def upload(request):
     scan_id = new_scan_id()
     os.makedirs(UPLOADS, exist_ok=True)
     source = os.path.join(UPLOADS, scan_id + extension)
+    out_dir = os.path.join(SCANS, scan_id)
     size = 0
+    published = False
     try:
         with open(source, "wb") as handle:
             while chunk := await part.read_chunk(1 << 20):
@@ -84,18 +86,19 @@ async def upload(request):
                 if size > MAX_GLB_BYTES:
                     raise ScanError("The file is too large.")
                 handle.write(chunk)
-        out_dir = os.path.join(SCANS, scan_id)
         summary = await asyncio.to_thread(process_scan, source, out_dir, request.app["ai"])
+        publish(scan_id)
+        published = True
     except ScanError as error:
-        if os.path.exists(source):
-            os.remove(source)
         print(f"[upload] rejected: {error}")
         return failure(str(error), 422)
     except Exception:
         traceback.print_exc()
         return failure("Processing failed. Check the laptop terminal.", 500)
+    finally:
+        if not published:  # Also covers a phone disconnecting mid-upload.
+            discard(source, out_dir)
 
-    publish(scan_id)
     print(f"[upload] {scan_id} ({size / 1e6:.2f} MB): {json.dumps(summary)}")
     return web.json_response({"id": scan_id, "summary": summary})
 

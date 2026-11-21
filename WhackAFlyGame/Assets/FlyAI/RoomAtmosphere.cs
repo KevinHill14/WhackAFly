@@ -75,9 +75,17 @@ namespace FlyAI
         float LightBoost => events != null ? events.LightBoost : 1f;
         float FogLift => events != null ? events.FogLift : 0f;
 
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void ResetStatics()
+        {
+            Current = null;
+            FogEnabled = true;
+        }
+
+        public void MakeCurrent() => Current = this;
+
         public void Setup(RoomData room, RoomTheme roomTheme, List<LightRig> lightRigs, RoomAssets assets)
         {
-            Current = this;
             theme = roomTheme;
             ceiling = room.ceilingHeight;
             outline = RoomVisuals.Outline(room);

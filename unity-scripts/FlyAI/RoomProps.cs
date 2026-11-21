@@ -44,7 +44,10 @@ namespace FlyAI
 
             if (room.wallDecor != null)
                 foreach (var decor in room.wallDecor)
-                    PlaceWallDecor(group.transform, decor, assets);
+                    PlaceWallDecor(group.transform, decor);
+
+            foreach (Transform prop in group.transform)
+                if (prop.name != "Prop mirror") SoftenMetal(prop.gameObject, assets);
             return group;
         }
 
@@ -60,7 +63,7 @@ namespace FlyAI
                 }
         }
 
-        static void PlaceWallDecor(Transform parent, WallDecorData decor, RoomAssets assets)
+        static void PlaceWallDecor(Transform parent, WallDecorData decor)
         {
             if (decor.center == null || decor.center.Length != 3 || decor.normal == null || decor.normal.Length != 3) return;
             var holder = new GameObject($"Prop {decor.type}");
@@ -69,7 +72,6 @@ namespace FlyAI
                 Object.Destroy(holder);
                 return;
             }
-            if (decor.type != "mirror") SoftenMetal(holder, assets);
             AddCollider(holder, decor.type);
             holder.transform.SetParent(parent, false);
             holder.transform.SetPositionAndRotation(RoomLoader.ToUnity(decor.center), Quaternion.LookRotation(RoomLoader.ToUnity(decor.normal)));

@@ -383,7 +383,7 @@ namespace FlyAI
             group.SetParent(root, false);
             foreach (var data in room.lights)
             {
-                ColorUtility.TryParseHtmlString(data.color, out var color);
+                if (!ColorUtility.TryParseHtmlString(data.color, out var color)) color = Color.white;
                 var go = new GameObject($"{data.id} {data.type}");
                 go.transform.SetParent(group, false);
                 go.transform.position = RoomLoader.ToUnity(data.position);
@@ -570,6 +570,7 @@ namespace FlyAI
             grain.intensity.Override(0f);
             grain.response.Override(0.75f);
             root.gameObject.AddComponent<RoomTension>().Setup(grain, vignette, theme.vignette);
+            foreach (var component in profile.components) assets.Keep(component);
         }
     }
 }

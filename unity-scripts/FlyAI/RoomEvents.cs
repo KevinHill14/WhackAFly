@@ -85,10 +85,14 @@ namespace FlyAI
         float thunderAt = -1f;
         bool buzzPlayed = true;
 
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void ResetStatics() => Current = null;
+
+        public void MakeCurrent() => Current = this;
+
         public void Setup(RoomData room, RoomTheme theme, RoomAssets assets, Material windowGlass)
         {
             windowPane = windowGlass;
-            Current = this;
             baseAmbient = theme.ambient * theme.ambientDim;
             var outline = RoomVisuals.Outline(room);
             var seed = 23;
@@ -321,7 +325,7 @@ namespace FlyAI
             ApplyGrade();
         }
 
-        // Uses a scanned window when there is one, otherwise the longest wall.
+        // Comes from the room's window, or the longest wall if it has none.
         void BuildHeadlight(RoomData room, List<Vector3> outline, RoomAssets assets)
         {
             if (outline.Count < 3) return;

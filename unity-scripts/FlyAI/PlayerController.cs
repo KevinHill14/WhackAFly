@@ -45,7 +45,7 @@ namespace FlyAI
         public int DamageBill { get; private set; }
 
         readonly Queue<(float time, Quaternion aim)> aimHistory = new Queue<(float, Quaternion)>();
-        readonly RaycastHit[] hits = new RaycastHit[16];
+        readonly RaycastHit[] hits = new RaycastHit[48];
 
         ISwatterInput input = new KeyboardMouseSwatter();
         CharacterController body;
@@ -181,6 +181,8 @@ namespace FlyAI
 
             if (Cursor.lockState != CursorLockMode.Locked)
             {
+                shake = 0f;
+                UpdateShake();
                 var mouse = Mouse.current;
                 if (mouse != null && mouse.leftButton.wasPressedThisFrame)
                 {
@@ -238,7 +240,7 @@ namespace FlyAI
         void KeepInRoom()
         {
             var position = transform.position;
-            if (roomOutline != null && !InsideRoom(position))
+            if (roomOutline != null && !InsideRoom(position) && InsideRoom(safePosition))
             {
                 MoveTo(safePosition);
                 return;
@@ -281,14 +283,15 @@ namespace FlyAI
 
         void RecordAim()
         {
-            aimHistory.Enqueue((Time.time, aimPivot.rotation));
+            // Stored relative to the body, so turning does not drag the delayed aim behind.
+            aimHistory.Enqueue((Time.time, Quaternion.Inverse(transform.rotation) * aimPivot.rotation));
             while (aimHistory.Count > 1 && Time.time - aimHistory.Peek().time > aimLookback + 0.1f) aimHistory.Dequeue();
         }
 
         // Uses the aim from just before the swing so the wrist whip does not throw it off.
         Quaternion AimBeforeSwing()
         {
-            var chosen = aimPivot.rotation;
+            var chosen = Quaternion.Inverse(transform.rotation) * aimPivot.rotation;
             var found = false;
             foreach (var entry in aimHistory)
             {
@@ -297,7 +300,7 @@ namespace FlyAI
                 found = true;
             }
             if (!found && aimHistory.Count > 0) chosen = aimHistory.Peek().aim;
-            return chosen;
+            return transform.rotation * chosen;
         }
 
         public void Swing(float strength)

@@ -33,6 +33,7 @@ namespace FlyAI
         float lastTapAt = -10f;
         bool holdFired;
         bool pingPending;
+        bool secondTap;
 
         public SwatterFrame Read()
         {
@@ -51,19 +52,22 @@ namespace FlyAI
                 {
                     pressedAt = now;
                     holdFired = false;
+                    secondTap = pingPending;
+                    pingPending = false;
                 }
                 if (space.isPressed && !holdFired && now - pressedAt >= HoldTime)
                 {
                     holdFired = true;
+                    secondTap = false;
                     pingPending = false;
                     frame.recenter = true;
                 }
                 if (space.wasReleasedThisFrame && !holdFired)
                 {
-                    if (now - lastTapAt < DoubleTapWindow)
+                    if (secondTap)
                     {
                         frame.quickTurn = true;
-                        pingPending = false;
+                        secondTap = false;
                         lastTapAt = -10f;
                     }
                     else

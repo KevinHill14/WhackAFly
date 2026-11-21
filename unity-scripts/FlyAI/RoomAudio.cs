@@ -64,7 +64,7 @@ namespace FlyAI
             source.playOnAwake = false;
             source.volume = volume;
             source.spatialBlend = 1f;
-            source.rolloffMode = AudioRolloffMode.Logarithmic;
+            source.rolloffMode = AudioRolloffMode.Linear; // Reaches silence, so sounds can be hunted by ear.
             source.minDistance = 0.7f;
             source.maxDistance = maxDistance;
             source.dopplerLevel = 0f;

@@ -5,6 +5,7 @@ kind of surface each item may use and how sparse a layout should be. Results are
 repeatable for the same file because the seed is derived from its contents.
 """
 import math
+import re
 from collections import Counter
 
 import numpy as np
@@ -131,7 +132,9 @@ PLAYER_HEIGHT = 1.8
 SWING_ORIGIN_HEIGHT = 1.6  # Matches the player's eye, where Unity starts each swing.
 SWAT_REACH = 2.0
 START_CLEARANCE = 0.45
-WALK_GRID = 0.25
+WALK_PASSES = ((PLAYER_RADIUS, 0.25), (0.15, 0.125))  # (body radius, grid step)
+WALL_COLLIDER_HALF = 0.1
+MAX_WALK_CELLS = 8000
 
 
 def rounded(values):
@@ -195,6 +198,22 @@ def segment_distance(point, starts, ends):
     return float(np.linalg.norm(starts + delta * t[:, None] - point, axis=1).min())
 
 
+def part_role(part):
+    """What a mesh is. Its group decides; the name is only a fallback for ungrouped meshes."""
+    lowered = part["name"].lower()
+    group = part["group"]
+    if group == "Walls":
+        return "joint" if lowered.startswith("joint") else "wall"
+    if group == "Floors":
+        return "floor"
+    if group == "Ceilings":
+        return "ceiling"
+    if group is not None:
+        return "object"
+    match = re.match(r"(wall|floor|ceiling|joint)(?![a-z])", lowered)
+    return match.group(1) if match else "object"
+
+
 def ceiling_triangles(vertices, faces):
     """The ceiling's underside when it has one, otherwise all of its faces."""
     triangles = vertices[faces]
@@ -239,7 +258,8 @@ class Surface:
         u, v = rng.random(2)
         if u + v > 1:
             u, v = 1 - u, 1 - v
-        return triangle[0] + u * (triangle[1] - triangle[0]) + v * (triangle[2] - triangle[0])
+        # Rounded first so what gets validated is exactly what room.json stores.
+        return np.round(triangle[0] + u * (triangle[1] - triangle[0]) + v * (triangle[2] - triangle[0]), 3)
 
     def edge_margin(self, point):
         if self.edges is None:
@@ -286,7 +306,7 @@ def wall_surface(part, wall, vertices, polygon):
     start, end = np.array(wall["start"]), np.array(wall["end"])
     direction = end - start
     length = np.linalg.norm(direction)
-    if length < 0.3:
+    if length < 0.3 or wall["height"] <= 0.05:
         return None
     direction /= length
     normal = np.array([-direction[1], direction[0]])
@@ -306,22 +326,25 @@ def wall_surface(part, wall, vertices, polygon):
     return Surface("wall", part["name"], quad, (inward[0], 0, inward[1]), use_edges=False)
 
 
+def floor_components(vertices, faces):
+    return [c for c in horizontal_components(vertices, faces) if abs(float(c[:, :, 1].max())) < 0.03]
+
+
 def detect_surfaces(parts, room, offset):
     polygon = np.array(room["floor"]["polygon"])
     walls = {wall["node"]: wall for wall in room["walls"]}
     labels = {item["node"]: item["label"] for item in room["objects"]}
-    floors = [p for p in parts if p["group"] == "Floors" or p["name"].lower().startswith("floor")]
-    floor_ids = {id(p) for p in floors}
     surfaces = []
     for part in parts:
-        name, lowered = part["name"], part["name"].lower()
+        name, role = part["name"], part_role(part)
         vertices = part["vertices"] + offset
-        if id(part) in floor_ids:
-            components = horizontal_components(vertices, part["faces"])
-            level = [c for c in components if abs(float(c[:, :, 1].max())) < 0.03]
+        if role == "floor":
+            level = floor_components(vertices, part["faces"])
+            if not level:  # The mesh may be inside out.
+                level = floor_components(vertices, part["faces"][:, ::-1])
             if level:
                 surfaces.append(Surface("floor", name, np.vstack(level), (0, 1, 0)))
-        elif part["group"] == "Ceilings" or lowered.startswith("ceiling"):
+        elif role == "ceiling":
             triangles = ceiling_triangles(vertices, part["faces"])
             if len(triangles):
                 surfaces.append(Surface("ceiling", name, triangles, (0, -1, 0), use_edges=False))
@@ -413,7 +436,7 @@ class Placer:
         for _ in range(tries):
             point = surface.sample(self.rng)
             if fixed_y is not None:
-                point[1] = min(fixed_y, float(surface.triangles[:, :, 1].max()) - 0.3)
+                point[1] = round(min(fixed_y, float(surface.triangles[:, :, 1].max()) - 0.3), 3)
             if near_wall and segment_distance(point[[0, 2]], self.poly_a, self.poly_b) > NEAR_WALL:
                 continue
             if accept is not None and not accept(point):
@@ -431,22 +454,39 @@ class Reach:
 
     def __init__(self, placer, room):
         self.placer = placer
+        self.cells = np.zeros((0, 3))
+        for radius, step in WALK_PASSES:  # Tight rooms get a second, narrower pass.
+            cells = self.walkable_cells(radius, step)
+            if cells:
+                self.keep_largest_area(cells, room)
+                return
+        room["warnings"].append("No walkable floor was found, so the fly has no landing spots.")
+
+    def walkable_cells(self, radius, step):
+        placer = self.placer
         polygon = placer.polygon
+        floors = [s for s in placer.surfaces if s.kind == "floor"]
+        probes = np.array([[0, 0], [radius, 0], [-radius, 0], [0, radius], [0, -radius]], float)
         low, high = polygon.min(0), polygon.max(0)
+        step = max(step, math.sqrt(float(np.prod(high - low)) / MAX_WALK_CELLS))  # Keeps huge floors fast.
         cells = {}
-        for i, x in enumerate(np.arange(low[0], high[0] + WALK_GRID, WALK_GRID)):
-            for j, z in enumerate(np.arange(low[1], high[1] + WALK_GRID, WALK_GRID)):
+        for i, x in enumerate(np.arange(low[0], high[0] + step, step)):
+            for j, z in enumerate(np.arange(low[1], high[1] + step, step)):
                 xz = np.array([x, z])
-                if not inside(polygon, xz) or segment_distance(xz, placer.poly_a, placer.poly_b) < PLAYER_RADIUS:
+                if not inside(polygon, xz) or segment_distance(xz, placer.poly_a, placer.poly_b) < radius:
                     continue
-                if segment_distance(xz, placer.wall_a, placer.wall_b) < PLAYER_RADIUS + WALL_CLEARANCE:
+                # Unity's wall colliders extend this far from the wall's centre line.
+                if segment_distance(xz, placer.wall_a, placer.wall_b) < radius + WALL_COLLIDER_HALF:
                     continue
-                if placer.hits_object(np.array([x, 0.01, z]), PLAYER_RADIUS, PLAYER_HEIGHT, None):
+                if placer.hits_object(np.array([x, 0.01, z]), radius, PLAYER_HEIGHT, None):
+                    continue
+                # The outline ignores holes, so check there is real floor underfoot.
+                if floors and not all(any(s.contains(xz + p) for s in floors) for p in probes):
                     continue
                 cells[(i, j)] = xz
-        self.cells = np.zeros((0, 3))
-        if not cells:
-            return
+        return cells
+
+    def keep_largest_area(self, cells, room):
         start = np.array([room["playerStart"]["position"][0], room["playerStart"]["position"][2]])
         # The player belongs in the largest connected walkable area.
         unvisited, best = set(cells), set()
@@ -464,8 +504,7 @@ class Reach:
                 best = seen
         ordered = sorted(best)
         nearest = min(ordered, key=lambda key: (float(np.linalg.norm(cells[key] - start)), key))
-        if np.linalg.norm(cells[nearest] - start) > WALK_GRID:
-            room["playerStart"]["position"] = rounded([cells[nearest][0], room["playerStart"]["position"][1], cells[nearest][1]])
+        room["playerStart"]["position"] = rounded([cells[nearest][0], room["playerStart"]["position"][1], cells[nearest][1]])
         self.cells = np.array([[cells[k][0], SWING_ORIGIN_HEIGHT, cells[k][1]] for k in ordered])
 
     def covered(self, point, surface):
@@ -641,19 +680,38 @@ class PlacementContext:
         return min(float(np.linalg.norm(point[[0, 2]] - np.array([l["position"][0], l["position"][2]]))) / l["range"]
                    for l in lights)
 
-    def choose_window(self):
+    def scanned_opening(self, item):
+        """A scanned door, window or opening, tied to its wall and facing into the room."""
+        angle = math.radians(item["rotationY"])
+        along = np.array([math.cos(angle), 0.0, -math.sin(angle)])
+        normal = np.array([math.sin(angle), 0.0, math.cos(angle)])
+        middle = np.array([item["position"][0], item["position"][2]])
+        walls = [s for s in self.surfaces if s.kind == "wall"]
+        nearest = min(walls, key=lambda s: (segment_distance(middle, s.triangles[0][0][[0, 2]][None],
+                                                             s.triangles[0][1][[0, 2]][None]), s.id), default=None)
+        if nearest is not None:
+            if float(normal @ nearest.normal) < 0:
+                normal = -normal
+        elif not inside(self.polygon, middle + normal[[0, 2]] * 0.25):
+            normal = -normal
+        return {"source": "scanned", "wall": nearest.owner if nearest else None, "center": item["position"],
+                "normal": rounded(normal), "along": rounded(along), "width": item["size"][0], "height": item["size"][1]}
+
+    def scanned_doors(self):
+        doors = []
+        for item in sorted((o for o in self.room["objects"] if o["label"] == "door"), key=lambda o: o["node"]):
+            door = self.scanned_opening(item)
+            face = np.array(item["position"], float) + np.array(door["normal"]) * item["size"][2] / 2
+            face[1] = item["size"][1] / 2
+            door["center"] = rounded(face)
+            doors.append(door)
+        return doors
+
+    def choose_window(self, scanned_doors):
         """Uses a scanned window, or fits a new one to the clearest stretch of wall."""
-        centre = self.polygon.mean(0)
         scanned = sorted((o for o in self.room["objects"] if o["label"] == "window"), key=lambda o: o["node"])
         if scanned:
-            item = scanned[0]
-            angle = math.radians(item["rotationY"])
-            along = np.array([math.cos(angle), 0.0, -math.sin(angle)])
-            normal = np.array([math.sin(angle), 0.0, math.cos(angle)])
-            if float((centre - np.array([item["position"][0], item["position"][2]])) @ normal[[0, 2]]) < 0:
-                normal = -normal
-            return {"source": "scanned", "wall": None, "center": item["position"], "normal": rounded(normal),
-                    "along": rounded(along), "width": item["size"][0], "height": item["size"][1]}
+            return self.scanned_opening(scanned[0])
 
         best, best_score = None, -math.inf
         for surface in (s for s in self.surfaces if s.kind == "wall"):
@@ -668,6 +726,9 @@ class PlacementContext:
             sill = float(np.clip(wall_height * 0.34, 0.55, wall_height - height - 0.22))
             for offset in np.arange(width / 2 + 0.25, length - width / 2 - 0.25 + 1e-6, 0.2):
                 base = start + along * offset
+                if any(door["wall"] == surface.owner and abs(float((base - np.array(door["center"])) @ along))
+                       < (width + door["width"]) / 2 + 0.2 for door in scanned_doors):
+                    continue
                 blocked = 0
                 for side in np.linspace(-width / 2, width / 2, 5):
                     probe = base + along * side + surface.normal * 0.25
@@ -681,26 +742,11 @@ class PlacementContext:
                             "along": rounded(along), "width": round(width, 3), "height": round(height, 3)}
         return best
 
-    def choose_doors(self, window):
+    def choose_doors(self, scanned_doors):
         """Uses every door found in the scan, or fits one to a clear stretch of wall."""
-        centre = self.polygon.mean(0)
+        if scanned_doors:
+            return scanned_doors
         walls = [s for s in self.surfaces if s.kind == "wall"]
-        doors = []
-        for item in sorted((o for o in self.room["objects"] if o["label"] == "door"), key=lambda o: o["node"]):
-            angle = math.radians(item["rotationY"])
-            along = np.array([math.cos(angle), 0.0, -math.sin(angle)])
-            normal = np.array([math.sin(angle), 0.0, math.cos(angle)])
-            middle = np.array([item["position"][0], item["position"][2]])
-            if float((centre - middle) @ normal[[0, 2]]) < 0:
-                normal = -normal
-            face = np.array(item["position"], float) + normal * item["size"][2] / 2
-            face[1] = item["size"][1] / 2
-            nearest = min(walls, key=lambda s: (segment_distance(middle, s.triangles[0][0][[0, 2]][None], s.triangles[0][1][[0, 2]][None]), s.id), default=None)
-            doors.append({"source": "scanned", "wall": nearest.owner if nearest else None, "center": rounded(face),
-                          "normal": rounded(normal), "along": rounded(along), "width": item["size"][0], "height": item["size"][1]})
-        if doors:
-            return doors
-
         best, best_score = None, -math.inf
         for surface in walls:
             start, end = surface.triangles[0][0], surface.triangles[0][1]
@@ -711,10 +757,11 @@ class PlacementContext:
             along = (end - start) / length
             width = float(np.clip(length * 0.4, 0.75, min(0.95, length - 0.4)))
             height = float(min(2.05, wall_height - 0.12))
-            same_wall = window is not None and window.get("wall") == surface.owner
+            on_wall = [o for o in self.placer.openings if o["wall"] == surface.owner]
+            same_wall = bool(on_wall)
             for offset in np.arange(width / 2 + 0.15, length - width / 2 - 0.15 + 1e-6, 0.15):
                 base = start + along * offset
-                if same_wall and abs(float((base - np.array(window["center"])) @ along)) < (width + window["width"]) / 2 + 0.3:
+                if any(abs(float((base - np.array(o["center"])) @ along)) < (width + o["width"]) / 2 + 0.3 for o in on_wall):
                     continue
                 blocked = 0
                 for side in np.linspace(-width / 2, width / 2, 4):
@@ -808,7 +855,7 @@ class PlacementContext:
                     surface = next((s for s in ceilings if s.contains(xz)), None)
                     if surface is None:
                         continue
-                    point = np.array([xz[0], surface.height, xz[1]])
+                    point = np.round([xz[0], surface.height, xz[1]], 3)
                     if placer.valid(point, surface, rule["radius"], rule["height"]):
                         add("ceiling_lamp", point, surface)
                         break
@@ -891,8 +938,6 @@ class PlacementContext:
         tables = sorted((s for s in self.surfaces if s.kind == "table"), key=lambda s: (-s.area, s.id))
         limit_scale = 1 + len(tables) // 2
         chosen = []
-        start = self.room["playerStart"]["position"]
-        placer.placed.append((np.array([start[0], 0.0, start[2]]), START_CLEARANCE))
 
         chosen_kinds = []
 
@@ -992,8 +1037,12 @@ class PlacementContext:
                 })
         return spots
 
+    def start_clearance(self):
+        start = self.room["playerStart"]["position"]
+        return np.array([start[0], 0.0, start[2]]), START_CLEARANCE
+
     def footprint_items(self, layout, exclude=None):
-        items = []
+        items = [self.start_clearance()]
         for prop in layout["props"]:
             if prop["id"] != exclude:
                 items.append((np.array(prop["position"], float), prop["radius"]))
@@ -1021,8 +1070,10 @@ class PlacementContext:
         if surface.kind not in rule["surfaces"]:
             return f"not allowed on {surface.kind}"
         point = np.array(item.get("mount", item["position"]), float)
-        if surface.kind != "wall" and (abs(point[1] - surface.height) > 0.03 or not surface.contains(point[[0, 2]])):
-            return "not on its surface"
+        if surface.kind != "wall":
+            heights = surface.triangles[:, :, 1]
+            if not heights.min() - 0.03 <= point[1] <= heights.max() + 0.03 or not surface.contains(point[[0, 2]]):
+                return "not on its surface"
         placer = self.placer
         saved = placer.placed
         placer.placed = self.footprint_items(layout, exclude)
@@ -1106,11 +1157,17 @@ class PlacementContext:
 def place_items(parts, room, offset, seed):
     surfaces = detect_surfaces(parts, room, offset)
     context = PlacementContext(room, surfaces, seed)
-    window = context.choose_window()
-    if window is not None and window["wall"] is not None:
-        context.placer.openings.append(window)
-    doors = context.choose_doors(window)
-    context.placer.openings.extend(d for d in doors if d["wall"] is not None)
+    placer = context.placer
+    placer.placed.append(context.start_clearance())
+    scanned_doors = context.scanned_doors()
+    window = context.choose_window(scanned_doors)
+    fixed = [context.scanned_opening(o) for o in room["objects"] if o["label"] in ("window", "opening")]
+    if window is not None and window["source"] == "generated":
+        fixed.append(window)
+    placer.openings.extend(o for o in fixed + scanned_doors if o["wall"] is not None)
+    doors = context.choose_doors(scanned_doors)
+    if not scanned_doors:
+        placer.openings.extend(d for d in doors if d["wall"] is not None)
     lights = context.place_lights()
     wall_decor = context.place_wall_decor()
     sounds = context.place_sounds()

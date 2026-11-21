@@ -25,9 +25,13 @@ namespace FlyAI
         float lastDistanceTime = -10f;
         bool debugHeld;
 
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void ResetStatics() => Current = null;
+
+        public void MakeCurrent() => Current = this;
+
         public void Setup(FilmGrain filmGrain, Vignette roomVignette, float vignetteAmount)
         {
-            Current = this;
             grain = filmGrain;
             vignette = roomVignette;
             baseVignette = vignetteAmount;

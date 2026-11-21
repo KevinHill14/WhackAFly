@@ -32,15 +32,28 @@ def publish(scan_id):
     replace_file(os.path.join(DATA, "latest.json"), json.dumps(latest, indent=1).encode("utf-8"))
 
 
+def discard(upload_path, scan_dir):
+    """Removes what a failed scan left behind."""
+    if os.path.exists(upload_path):
+        os.remove(upload_path)
+    shutil.rmtree(scan_dir, ignore_errors=True)
+
+
 def ingest_file(path, ai=False):
     extension = os.path.splitext(path)[1].lower()
     if extension not in ALLOWED:
         raise ScanError("Use a .glb or .zip export.")
     scan_id = new_scan_id()
-    summary = process_scan(path, os.path.join(SCANS, scan_id), ai=ai)
-    os.makedirs(UPLOADS, exist_ok=True)
-    shutil.copyfile(path, os.path.join(UPLOADS, scan_id + extension))
-    publish(scan_id)
+    scan_dir = os.path.join(SCANS, scan_id)
+    copy_path = os.path.join(UPLOADS, scan_id + extension)
+    try:
+        summary = process_scan(path, scan_dir, ai=ai)
+        os.makedirs(UPLOADS, exist_ok=True)
+        shutil.copyfile(path, copy_path)
+        publish(scan_id)
+    except Exception:
+        discard(copy_path, scan_dir)
+        raise
     return scan_id, summary
 
 

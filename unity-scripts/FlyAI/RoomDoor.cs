@@ -14,7 +14,7 @@ namespace FlyAI
             var panel = assets.Keep(new Material(slab));
             panel.SetColor("_BaseColor", slab.GetColor("_BaseColor") * 0.78f);
             var brass = assets.Keep(RoomVisuals.LitMaterial(new Color(0.62f, 0.46f, 0.2f), 0.72f));
-            brass.SetFloat("_Metallic", 0.85f);
+            brass.SetFloat("_Metallic", 0.25f); // The room has no reflections, so full metal renders black.
 
             foreach (var door in room.doors)
             {

@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Threading.Tasks;
 using GLTFast;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -17,6 +16,7 @@ namespace FlyAI
 
         string dataDirectory;
         string loadedId;
+        string failedScanKey;
         bool loading;
         float nextCheck;
         GameObject currentRoot;
@@ -123,7 +123,7 @@ namespace FlyAI
             markerSet.sound.SetActive(showSound);
         }
 
-        // Switches the markers between the rule-based and AI-cleaned layouts.
+        // Switches props and markers between the rule-based and AI-cleaned layouts.
         public void ToggleLayout()
         {
             if (loading || currentRoot == null || string.IsNullOrEmpty(roomDirectory)) return;
@@ -174,33 +174,47 @@ namespace FlyAI
             var latestPath = Path.Combine(dataDirectory, "latest.json");
             if (!File.Exists(latestPath)) return;
 
+            // A scan that failed is not retried until latest.json changes or R is pressed.
+            var scanKey = File.GetLastWriteTimeUtc(latestPath).Ticks.ToString();
+            if (!force && scanKey == failedScanKey) return;
+
             loading = true;
             GltfImport import = null;
             GameObject root = null;
+            var camera = GetCamera();
+            var previousFarClip = camera.farClipPlane;
             try
             {
                 var latest = JsonUtility.FromJson<LatestScan>(File.ReadAllText(latestPath));
                 if (latest == null || string.IsNullOrEmpty(latest.id) || (!force && latest.id == loadedId)) return;
 
                 var room = JsonUtility.FromJson<RoomData>(File.ReadAllText(Path.Combine(dataDirectory, latest.room)));
+                Validate(room);
                 var bytes = File.ReadAllBytes(Path.Combine(dataDirectory, latest.glb));
 
                 import = new GltfImport();
-                if (!await import.LoadGltfBinary(bytes)) throw new InvalidDataException("glTFast could not read the scan.");
+                if (!await import.Load(bytes)) throw new InvalidDataException("glTFast could not read the scan.");
+                if (this == null) return; // Play mode ended during the load.
 
                 root = new GameObject($"Room {latest.id}");
                 var mesh = new GameObject("Mesh");
                 mesh.transform.SetParent(root.transform, false);
                 if (!await import.InstantiateMainSceneAsync(mesh.transform))
                     throw new InvalidDataException("glTFast could not create the scene.");
+                if (this == null) return;
 
-                RoomVisuals.Apply(root.transform, mesh.transform, room, theme, GetCamera());
+                RoomVisuals.Apply(root.transform, mesh.transform, room, theme, camera);
                 BuildColliders(root.transform, room);
                 var builtProps = RoomProps.Build(root.transform, room);
                 var boxes = BuildDebugBoxes(root.transform, room);
                 var markers = BuildMarkerSet(root.transform, room);
                 PlacePlayer(room);
 
+                // Nothing can fail past this point, so the new room takes over.
+                root.GetComponent<RoomAtmosphere>().MakeCurrent();
+                root.GetComponent<RoomEvents>().MakeCurrent();
+                root.GetComponent<RoomTension>().MakeCurrent();
+                failedScanKey = null;
                 if (currentRoot != null) Destroy(currentRoot);
                 currentImport?.Dispose();
                 currentRoot = root;
@@ -219,15 +233,38 @@ namespace FlyAI
             }
             catch (Exception error)
             {
+                failedScanKey = scanKey;
+                if (camera != null) camera.farClipPlane = previousFarClip;
                 Debug.LogError($"[FlyAI] Scan load failed: {error}");
             }
             finally
             {
-                if (root != null) Destroy(root);
+                if (root != null)
+                {
+                    root.SetActive(false);
+                    if (Application.isPlaying) Destroy(root);
+                }
                 import?.Dispose();
                 loading = false;
             }
         }
+
+        // Stops a bad room.json before it can disturb the room already running.
+        static void Validate(RoomData room)
+        {
+            var valid = room != null && room.ceilingHeight > 0f && room.floor != null && room.floor.polygonFlat != null
+                        && room.floor.polygonFlat.Length >= 6 && room.floor.polygonFlat.Length % 2 == 0
+                        && room.walls != null && room.objects != null
+                        && room.playerStart != null && HasLength(room.playerStart.position, 3);
+            if (valid)
+            {
+                foreach (var wall in room.walls) valid &= HasLength(wall.start, 2) && HasLength(wall.end, 2);
+                foreach (var item in room.objects) valid &= HasLength(item.position, 3) && HasLength(item.size, 3);
+            }
+            if (!valid) throw new InvalidDataException("room.json is incomplete. Re-run ingest for this scan.");
+        }
+
+        static bool HasLength(float[] values, int length) => values != null && values.Length == length;
 
         // room.json is right-handed glTF space. This is the only conversion to Unity space.
         internal static Vector3 ToUnity(float x, float y, float z) => new Vector3(-x, y, z);

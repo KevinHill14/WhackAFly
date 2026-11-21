@@ -13,6 +13,7 @@ namespace FlyAI
         string type;
         Reaction reaction;
         bool damaged;
+        Quaternion? wobbleRest;
 
         public void Setup(string propType)
         {
@@ -121,7 +122,9 @@ namespace FlyAI
 
         IEnumerator Wobble(Vector3 direction, float strength)
         {
-            var rest = transform.rotation;
+            // Kept from the first hit, so a second hit mid-wobble cannot leave it tilted.
+            wobbleRest ??= transform.rotation;
+            var rest = wobbleRest.Value;
             var axis = Vector3.Cross(Vector3.up, direction).normalized;
             if (axis.sqrMagnitude < 0.01f) axis = transform.right;
             var size = Mathf.Lerp(7f, 15f, strength);
@@ -180,7 +183,14 @@ namespace FlyAI
             velocity = launchVelocity;
             spin = Random.insideUnitSphere * 540f;
             startScale = transform.localScale;
-            ground = Physics.Raycast(transform.position, Vector3.down, out var hit, 8f, ~0, QueryTriggerInteraction.Ignore) ? hit.point.y + 0.004f : 0.004f;
+            ground = 0.004f;
+            var nearest = float.MaxValue;
+            foreach (var hit in Physics.RaycastAll(transform.position + Vector3.up * 0.06f, Vector3.down, 8f, ~0, QueryTriggerInteraction.Ignore))
+            {
+                if (hit.collider is CharacterController || hit.distance >= nearest) continue;
+                nearest = hit.distance;
+                ground = hit.point.y + 0.004f;
+            }
         }
 
         void Update()
