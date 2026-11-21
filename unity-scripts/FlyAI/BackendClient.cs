@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
@@ -120,10 +121,19 @@ namespace FlyAI
             Current.outgoing.Enqueue($"{{\"type\":\"pose\",\"head\":{V(head)},\"aim\":{V(aim)},\"reach\":{F(reach)}}}");
         }
 
-        public static void SendSwing(Vector3 origin, Vector3 direction, float strength, float reach)
+        // swept: for a directional swing, the directions the swatter passed through before `direction`, where it
+        // landed. The backend hits the fly if it is near any of them. Older backends ignore the field.
+        public static void SendSwing(Vector3 origin, Vector3 direction, float strength, float reach, List<Vector3> swept = null)
         {
             if (Current == null || !Current.connected) return;   // old swings must not replay later
-            Current.outgoing.Enqueue($"{{\"type\":\"swing\",\"origin\":{V(origin)},\"dir\":{V(direction)},\"strength\":{F(strength)},\"reach\":{F(reach)}}}");
+            var dirs = "";
+            if (swept != null && swept.Count > 0)
+            {
+                var parts = new string[Mathf.Min(swept.Count, 32)];
+                for (var i = 0; i < parts.Length; i++) parts[i] = V(swept[i]);
+                dirs = ",\"dirs\":[" + string.Join(",", parts) + "]";
+            }
+            Current.outgoing.Enqueue($"{{\"type\":\"swing\",\"origin\":{V(origin)},\"dir\":{V(direction)},\"strength\":{F(strength)},\"reach\":{F(reach)}{dirs}}}");
         }
 
         // The room has loaded. If the backend is reachable it runs the fly; Unity only draws it and runs the round UI.

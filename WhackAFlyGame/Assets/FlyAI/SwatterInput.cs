@@ -10,6 +10,9 @@ namespace FlyAI
         public Vector2 aimDelta;
         public bool swing;
         public float swingStrength;
+        // Which way the real swing went, in degrees of aim (x = right, y = up). The swatter sweeps that far along it
+        // and hits the first thing in the way. Zero means the classic chop straight along the aim (mouse, keyboard).
+        public Vector2 swingStroke;
         public bool ping;
         public bool quickTurn;
         public bool recenter;
@@ -39,6 +42,7 @@ namespace FlyAI
                 if (e.evt != "swing") continue;
                 frame.swing = true;
                 frame.swingStrength = Mathf.Lerp(0.4f, 1f, Mathf.InverseLerp(MinRate, FullRate, e.rate));
+                frame.swingStroke = ImuSwatter.StrokeFor(e.axis, e.dir, frame.swingStrength);
             }
             return frame;
         }
