@@ -40,3 +40,39 @@ picture_d: fancy_picture_frame_02
 picture_e: hanging_picture_frame_03
 picture_c: fancy_picture_frame_01
 mirror: ornate_mirror_01
+
+Medieval theme (files in Resources/FlyAIProps/Medieval and Resources/FlyAITextures/Medieval)
+Room textures from ambientCG (https://ambientcg.com)
+Floor: Tiles130
+Wall: Bricks113A
+Ceiling: Planks037A
+Wood: Wood067
+Prop models from Poly Haven (https://polyhaven.com), textures reduced to 512 px
+radio: Ukulele_01 (laid flat)
+laptop: chess_set
+water_bottle: wine_bottles_01 (bordeaux bottle only)
+takeout_box: wooden_crate_01
+trash_bag: wine_barrel_01
+table_clock: wooden_lantern_01
+wall_clock: kite_shield
+knife: ornate_medieval_dagger
+picture_frame: lion_head
+jar: ceramic_pot
+
+Futuristic theme (files in Resources/FlyAIProps/Futuristic and Resources/FlyAITextures/Futuristic)
+Room textures from ambientCG (https://ambientcg.com)
+Floor: MetalPlates017A
+Wall: Tiles107
+Ceiling: MetalPlates005
+Wood: Metal032
+Prop models from Poly Haven (https://polyhaven.com), textures reduced to 512 px
+radio: gaming_console
+table_clock: vintage_spacecraft_instrument
+takeout_box: plastic_container
+trash_bag: industrial_pastic_container
+basket: plastic_crate_02
+jar: ceramic_vase_01
+brass_vase: ceramic_vase_03
+jug: metal_jug
+picture_d: hanging_picture_frame_01
+picture_e: hanging_picture_frame_01

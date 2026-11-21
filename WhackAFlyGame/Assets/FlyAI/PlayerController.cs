@@ -254,6 +254,13 @@ namespace FlyAI
                 }
             }
 
+            // No walking or swinging while the theme menu is open; a swing in progress still finishes.
+            if (ThemeMenu.IsOpen)
+            {
+                AnimateSwatter();
+                return;
+            }
+
             var frame = input.Read();
             if (!captured && !(input is ImuSwatter && !finished)) // The sensor does not need the mouse captured.
             {

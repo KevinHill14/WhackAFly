@@ -22,9 +22,31 @@ namespace FlyAI
             "announce_go", "fly_splat", "surge_slam", // only played when a recording exists in Resources/FlyAISfx
         };
 
+        const string SoundFolder = "FlyAISounds/";
+
+        // Clips loaded from a theme folder, keyed "folder/name". A null value records a file
+        // that does not exist, so Resources is only searched once per theme and name.
+        static readonly Dictionary<string, AudioClip> ThemedCache = new Dictionary<string, AudioClip>();
+        static string themeFolder;
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void ResetStatics()
+        {
+            themeFolder = null;
+            ThemedCache.Clear();
+        }
+
+        // Null or empty means the house: every sound is synthesised exactly as before.
+        public static void SetTheme(string folder) => themeFolder = string.IsNullOrEmpty(folder) ? null : folder;
+
         public static AudioClip Get(string name)
         {
             if (string.IsNullOrEmpty(name)) return null;
+            if (themeFolder != null)
+            {
+                var themed = GetThemed(themeFolder, name);
+                if (themed != null) return themed;
+            }
             if (Cache.TryGetValue(name, out var cached) && cached != null) return cached;
             var recorded = Resources.Load<AudioClip>("FlyAISfx/" + name);
             if (recorded != null)
@@ -37,6 +59,19 @@ namespace FlyAI
             var clip = AudioClip.Create(name, samples.Length, 1, Rate, false);
             clip.SetData(samples, 0);
             Cache[name] = clip;
+            return clip;
+        }
+
+        static AudioClip GetThemed(string folder, string name)
+        {
+            var key = folder + "/" + name;
+            if (ThemedCache.TryGetValue(key, out var known))
+            {
+                // A destroyed clip compares equal to null; search again in that case.
+                if (known != null || ReferenceEquals(known, null)) return known;
+            }
+            var clip = Resources.Load<AudioClip>(SoundFolder + key);
+            ThemedCache[key] = clip;
             return clip;
         }
 

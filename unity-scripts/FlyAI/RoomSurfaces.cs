@@ -58,13 +58,13 @@ namespace FlyAI
         public static Material MaterialFor(string category, RoomTheme theme, RoomAssets assets)
         {
             var set = TextureSet(category);
-            var colorMap = set == null ? null : Resources.Load<Texture2D>(TextureFolder + set + "_Color");
+            var colorMap = set == null ? null : LoadTexture(set + "_Color", theme);
             var tint = colorMap != null ? Tint(category, theme) : RoomVisuals.ColorFor(category, theme);
             var material = assets.Keep(RoomVisuals.LitMaterial(tint, RoomVisuals.SmoothnessFor(category)));
             if (colorMap == null) return material;
 
             material.SetTexture("_BaseMap", colorMap);
-            var normalMap = Resources.Load<Texture2D>(TextureFolder + set + "_Normal");
+            var normalMap = LoadTexture(set + "_Normal", theme);
             if (normalMap != null)
             {
                 material.SetTexture("_BumpMap", normalMap);
@@ -72,6 +72,17 @@ namespace FlyAI
                 material.EnableKeyword("_NORMALMAP");
             }
             return material;
+        }
+
+        // A theme's own texture wins; otherwise the house texture. Themes without a folder load the house one directly.
+        static Texture2D LoadTexture(string file, RoomTheme theme)
+        {
+            if (!string.IsNullOrEmpty(theme.folder))
+            {
+                var themed = Resources.Load<Texture2D>(TextureFolder + theme.folder + "/" + file);
+                if (themed != null) return themed;
+            }
+            return Resources.Load<Texture2D>(TextureFolder + file);
         }
 
         // The direction of the room's longest scanned wall, so floorboards follow the room.

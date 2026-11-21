@@ -13,6 +13,7 @@ namespace FlyAI
         const float SlabThickness = 2f;
 
         RoomTheme theme = RoomThemes.Main;
+        bool themeChanged;
 
         // The main menu turns this on when Play is pressed. With the menu skipped (FLYAI_SKIP_MENU) it is on from the start.
         public bool AutoLoad = true;
@@ -60,6 +61,9 @@ namespace FlyAI
         void Awake()
         {
             dataDirectory = FindDataDirectory();
+            theme = ThemeMenu.SavedTheme();
+            FlySounds.SetTheme(theme.folder);
+            gameObject.AddComponent<ThemeMenu>();
             ApplyLook();
             Debug.Log($"[FlyAI] Watching {dataDirectory}");
         }
@@ -94,9 +98,29 @@ namespace FlyAI
             return go.AddComponent<Camera>();
         }
 
+        public RoomTheme Theme => theme;
+
+        // Switches theme and rebuilds the current room with it through the normal reload.
+        public void SetTheme(RoomTheme next)
+        {
+            if (next == null || next == theme) return;
+            theme = next;
+            FlySounds.SetTheme(theme.folder);
+            ApplyLook();
+            themeChanged = true;
+            Debug.Log($"[FlyAI] Theme: {theme.name}");
+        }
+
         void Update()
         {
-            if (!AutoLoad || Time.unscaledTime < nextCheck) return;
+            if (!AutoLoad) return;
+            // Waits for any load in progress, then reloads the room with the new theme.
+            if (themeChanged && !loading)
+            {
+                themeChanged = false;
+                CheckForScan(true);
+            }
+            if (Time.unscaledTime < nextCheck) return;
             nextCheck = Time.unscaledTime + 1f;
             if (loading)
             {
@@ -185,7 +209,7 @@ namespace FlyAI
                 var room = JsonUtility.FromJson<RoomData>(File.ReadAllText(useAi ? aiPath : rulesPath));
                 var markers = BuildMarkerSet(currentRoot.transform, room);
                 if (propGroup != null) Destroy(propGroup);
-                propGroup = RoomProps.Build(currentRoot.transform, room);
+                propGroup = RoomProps.Build(currentRoot.transform, room, theme);
                 if (markerSet != null) Destroy(markerSet.root);
                 markerSet = markers;
                 showingAi = useAi;
@@ -229,6 +253,7 @@ namespace FlyAI
             GameObject root = null;
             var camera = GetCamera();
             var previousFarClip = camera.farClipPlane;
+            var buildTheme = theme;
             try
             {
                 var latest = JsonUtility.FromJson<LatestScan>(File.ReadAllText(latestPath));
@@ -249,10 +274,10 @@ namespace FlyAI
                     throw new InvalidDataException("glTFast could not create the scene.");
                 if (this == null || generation != loadGeneration) return;
 
-                RoomVisuals.Apply(root.transform, mesh.transform, room, theme, camera);
+                RoomVisuals.Apply(root.transform, mesh.transform, room, buildTheme, camera);
                 BuildColliders(root.transform, room);
                 LinkVisuals(root.transform, mesh.transform);
-                var builtProps = RoomProps.Build(root.transform, room);
+                var builtProps = RoomProps.Build(root.transform, room, buildTheme);
                 var boxes = BuildDebugBoxes(root.transform, room);
                 var markers = BuildMarkerSet(root.transform, room);
                 PlacePlayer(room);
