@@ -187,6 +187,7 @@ namespace FlyAI
             UpdateSwatterSize(false);
             message = "Find the fly";
             ApplyAim();
+            Leaderboard.StartRun(this);
         }
 
         void SetPlaying(bool value)
@@ -213,6 +214,7 @@ namespace FlyAI
 
         void Update()
         {
+            if (Leaderboard.TypingName) return; // Keys spell the player's name, not commands.
             var keyboard = Keyboard.current;
             if (keyboard != null && keyboard.tabKey.wasPressedThisFrame) SetPlaying(!playing);
             if (!playing) return;

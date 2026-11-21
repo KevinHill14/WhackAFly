@@ -84,7 +84,7 @@ namespace FlyAI
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
             var mouse = Mouse.current;
-            if (keyboard != null)
+            if (keyboard != null && !Leaderboard.TypingName)
             {
                 move.x = (keyboard.dKey.isPressed ? 1 : 0) - (keyboard.aKey.isPressed ? 1 : 0);
                 move.y = (keyboard.eKey.isPressed ? 1 : 0) - (keyboard.qKey.isPressed ? 1 : 0);

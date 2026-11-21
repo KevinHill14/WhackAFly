@@ -92,6 +92,8 @@ namespace FlyAI
 
         public void ReloadScan() => CheckForScan(true);
 
+        public string ThemeName => theme.name;
+
         public void ToggleDebugBoxes()
         {
             if (debugBoxes != null) debugBoxes.SetActive(!debugBoxes.activeSelf);

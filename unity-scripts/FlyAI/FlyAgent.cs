@@ -266,7 +266,7 @@ namespace FlyAI
         void Update()
         {
             var keyboard = Keyboard.current;
-            if (keyboard != null && keyboard.jKey.wasPressedThisFrame) showStatus = !showStatus;
+            if (keyboard != null && keyboard.jKey.wasPressedThisFrame && !Leaderboard.TypingName) showStatus = !showStatus;
 
             if (player == null) player = FindFirstObjectByType<PlayerController>();
             if (player == null || state == State.Dead) return;
@@ -474,11 +474,15 @@ namespace FlyAI
             if (decision.strength >= EscapeThreshold)
             {
                 lastAction = $"TAKE OFF ({decision.side})";
+                Leaderboard.Log("fly_escape", Leaderboard.Data("strength", decision.strength, "side", decision.side, "from", source,
+                    "x", transform.position.x, "y", transform.position.y, "z", transform.position.z));
                 TakeOff(decision.strength, decision.side);
             }
             else if (decision.strength >= FleeThreshold)
             {
                 lastAction = $"walking away ({decision.side})";
+                if (Time.time >= fleeUntil) // Logged once per flee, not on every brain message.
+                    Leaderboard.Log("fly_flee", Leaderboard.Data("strength", decision.strength, "side", decision.side, "from", source));
                 fleeUntil = Time.time + 0.6f;
                 fleeSide = decision.side;
                 if (state == State.Perched) StartWalk(Random.Range(2, 5));
@@ -517,6 +521,7 @@ namespace FlyAI
             foreach (var leg in legs) leg.gameObject.SetActive(false);
             AudioSource.PlayClipAtPoint(FlySounds.Get("impact_squish"), transform.position, 0.8f);
             player.Announce("You got the fly!  (R to reload the room)");
+            Leaderboard.FlySwatted(player.DamageBill);
         }
 
         // --- Perching and walking ------------------------------------------------------------------------
