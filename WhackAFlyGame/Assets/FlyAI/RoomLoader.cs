@@ -36,9 +36,7 @@ namespace FlyAI
         GameObject debugBoxes;
         MarkerSet markerSet;
         GameObject propGroup;
-        bool showItems;
-        bool showLanding;
-        bool showSound;
+        bool revealed;   // R: every kind of placement shown at once
         bool showingAi;
         string roomDirectory;
         GameObject ceilingOwner;
@@ -162,35 +160,20 @@ namespace FlyAI
 
         public string ThemeName => theme.name;
 
-        public void ToggleDebugBoxes()
+        // Shows or hides every placement together: object outlines, props and lights, fly landing spots, sound sources.
+        public void ToggleReveal()
         {
-            if (debugBoxes != null) debugBoxes.SetActive(!debugBoxes.activeSelf);
-        }
-
-        public void TogglePlacementMarkers()
-        {
-            showItems = !showItems;
-            ApplyMarkerVisibility();
-        }
-
-        public void ToggleLandingMarkers()
-        {
-            showLanding = !showLanding;
-            ApplyMarkerVisibility();
-        }
-
-        public void ToggleSoundMarkers()
-        {
-            showSound = !showSound;
+            revealed = !revealed;
             ApplyMarkerVisibility();
         }
 
         void ApplyMarkerVisibility()
         {
+            if (debugBoxes != null) debugBoxes.SetActive(revealed);
             if (markerSet == null) return;
-            markerSet.items.SetActive(showItems);
-            markerSet.landing.SetActive(showLanding);
-            markerSet.sound.SetActive(showSound);
+            markerSet.items.SetActive(revealed);
+            markerSet.landing.SetActive(revealed);
+            markerSet.sound.SetActive(revealed);
         }
 
         // Switches props and markers between the rule-based and AI-cleaned layouts.

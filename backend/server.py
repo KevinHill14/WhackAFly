@@ -516,7 +516,7 @@ async def main():
     p.add_argument("--practice", action="store_true", help="free play: no countdown or timer, the fly respawns")
     p.add_argument("--round-seconds", type=float, default=60.0, help="length of the hunt")
     p.add_argument("--countdown-seconds", type=float, default=3.0, help="length of the 3-2-1 countdown")
-    p.add_argument("--rt-priority", type=int, default=20, help="QNX real-time priority, 0 to leave unchanged")
+    p.add_argument("--rt-priority", type=int, default=0, help="QNX real-time priority, 0 to leave unchanged (20 starved Wi-Fi)")
     p.add_argument("--classifier", default=os.environ.get("SWATTER_CLASSIFIER", "model"),
                    choices=["threshold", "model"], help="swing detection: the trained model (default) or the firmware's rules")
     p.add_argument("--model", default=os.environ.get("SWATTER_MODEL"), help="model folder (default swatter_ml/models/latest)")

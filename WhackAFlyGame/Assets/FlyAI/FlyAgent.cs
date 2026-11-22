@@ -134,7 +134,6 @@ namespace FlyAI
         float landedAt;
         float nextChirp;
         float chirpUntil;
-        bool showStatus = true;
 
         // Personality: rolled for each fly. It only scales what the fly senses and how it moves; the brain still decides.
         public string PersonalityName { get; private set; } = "Steady";
@@ -143,7 +142,6 @@ namespace FlyAI
         float nightSight = 1f;  // How well it still sees in the dark.
         float pace = 1f;        // Walking and flying speed.
         float hearing = 1f;     // Scales how loud sounds are to it.
-        GUIStyle statusStyle;
 
         // Remote mode: the Pi runs the fly and this follows it.
         bool remote;
@@ -342,7 +340,6 @@ namespace FlyAI
         void OnDestroy()
         {
             if (Current == this) Current = null;
-            UiHit.Clear("brain");
             if (glowTexture != null) Destroy(glowTexture);
         }
 
@@ -361,7 +358,6 @@ namespace FlyAI
         void Update()
         {
             var keyboard = Keyboard.current;
-            if (keyboard != null && keyboard.jKey.wasPressedThisFrame) showStatus = !showStatus;
 
             if (player == null) player = FindFirstObjectByType<PlayerController>();
             if (player == null || state == State.Dead) return;
@@ -1189,70 +1185,10 @@ namespace FlyAI
             GUI.color = previousColor;
         }
 
-        // --- Brain panel (top right, so it never overlaps the player's HUD) ------------------------------
-
-        static int Spike(int[] spikes, int index) => spikes != null && index < spikes.Length ? spikes[index] : 0;
-
-        // How used to each kind of input the fly has got (100% = fresh, lower = it reacts less).
-        string HabituationLine()
-        {
-            var e = remote ? BackendClient.Efficacy : client?.Efficacy;
-            if (e == null) return "";
-            string P(float v) => v < 0.97f ? $"<color=#FFC857>{Mathf.RoundToInt(v * 100f)}%</color>" : "100%";
-            return $"<b>Used to it</b>  eyes L {P(e[0])} R {P(e[1])}   ears L {P(e[2])} R {P(e[3])}";
-        }
-
         void OnGUI()
         {
             if (MainMenu.Active) return;
             DrawMarker();
-            // The brain panel's toggle. Press Esc to free the mouse, then click it (J works any time).
-            var toggle = new Rect(Screen.width - 166f, 12f, 150f, 24f);
-            UiHit.Set("brain", toggle);
-            if (GUI.Button(toggle, showStatus ? "Fly brain  [hide]" : "Fly brain  [show]")) showStatus = !showStatus;
-            if (!showStatus) return;
-            if (statusStyle == null)
-                statusStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, richText = true, wordWrap = false, normal = { textColor = new Color(0.86f, 0.9f, 0.86f) } };
-                statusStyle.hover.textColor = statusStyle.active.textColor = statusStyle.focused.textColor = statusStyle.normal.textColor;
-
-            var online = remote ? BackendClient.Connected : client != null && client.Connected;
-            var brainText = remote ? BackendClient.BrainInfo : client?.BrainInfo;
-            var info = string.IsNullOrEmpty(brainText) ? "connected" : brainText;
-            var header = online ? $"<color=#7CFF9B>FLY BRAIN  {info}</color>"
-                       : client == null && !remote ? "<color=#FF7C7C>FLY BRAIN  switched off - fly not reacting</color>"
-                       : "<color=#FF7C7C>FLY BRAIN  OFFLINE - fly not reacting</color>";
-            var fresh = Time.time - lastDecisionAt < 0.5f;
-            var strength = fresh ? lastStrength : 0f;
-            var spikes = fresh ? lastSpikes : null;
-
-            var lines = new[]
-            {
-                header,
-                remote ? (online ? "running on the Raspberry Pi" : "Raspberry Pi link lost, reconnecting") : online ? client.url : "start brain/server.py, or set FLYAI_BRAIN",
-                "",
-                $"<b>Stimulus</b>   looming {looming:0.00}   eye {eye}   from {source}",
-                $"<b>Light</b>       at fly {lightLevel:0.00}   vision {vision:0.00}   flashlight on fly {flashlightOnFly:0.00}",
-                $"<b>Brain out</b>  strength {strength:0.00}   jumps {(fresh ? lastDecisionSide : "-")}",
-                HabituationLine(),
-                $"Eye inputs     LPLC2 L{Spike(spikes, 0)} R{Spike(spikes, 1)}    LC4 L{Spike(spikes, 2)} R{Spike(spikes, 3)}",
-                $"Giant Fiber    L{Spike(spikes, 9)} R{Spike(spikes, 10)}   (DNp01)",
-                $"Escape DNs     02: {Spike(spikes, 11)}/{Spike(spikes, 12)}   04: {Spike(spikes, 13)}/{Spike(spikes, 14)}   11: {Spike(spikes, 17)}/{Spike(spikes, 18)}",
-                "",
-                $"<b>Fly</b>         {state}   last action: {lastAction}",
-                $"<b>Personality</b>  {PersonalityName}",
-                "[J] or the button hides this",
-            };
-
-            const float lineHeight = 19f;
-            var width = 470f;
-            var height = lines.Length * lineHeight + 14f;
-            var panel = new Rect(Screen.width - width - 16f, 42f, width, height);
-            var previous = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.62f);
-            GUI.DrawTexture(panel, Texture2D.whiteTexture);
-            GUI.color = previous;
-            for (var i = 0; i < lines.Length; i++)
-                GUI.Label(new Rect(panel.x + 10f, panel.y + 7f + i * lineHeight, width - 20f, lineHeight), lines[i], statusStyle);
         }
     }
 }

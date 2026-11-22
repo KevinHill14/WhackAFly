@@ -161,6 +161,26 @@ namespace FlyAI
 
         float Range(float low, float high) => Mathf.Lerp(low, high, (float)random.NextDouble());
 
+        // T in the game: the next event in turn, so every one can be shown on demand. Returns its name, or null when
+        // a blackout or surge is still running (those never overlap) and nothing was started.
+        static readonly string[] EventNames = { "headlights", "lightning", "blackout", "power surge" };
+        int nextEvent;
+
+        public string TriggerNext()
+        {
+            var index = nextEvent;
+            if (index >= 2 && (blackoutActive || surgeActive)) return null;
+            nextEvent = (nextEvent + 1) % EventNames.Length;
+            switch (index)
+            {
+                case 0: TriggerHeadlights(); break;
+                case 1: TriggerLightning(); break;
+                case 2: TriggerBlackout(); break;
+                default: TriggerSurge(); break;
+            }
+            return EventNames[index];
+        }
+
         public void TriggerBlackout()
         {
             if (blackoutActive || surgeActive) return;

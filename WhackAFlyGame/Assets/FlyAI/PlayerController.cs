@@ -78,16 +78,8 @@ namespace FlyAI
             popups.Add(new DamagePopup { point = point, text = text, born = Time.unscaledTime, color = color, size = size });
         }
 
-        public void ToggleFlashlight()
-        {
-            var on = !Flashlight.enabled;
-            Flashlight.enabled = on;
-            var fx = Flashlight.GetComponent<FlashlightFx>();
-            if (fx != null) fx.enabled = on;
-            foreach (Transform child in Flashlight.transform) child.gameObject.SetActive(on); // The visible beam.
-            playerAudio.PlayOneShot(FlySounds.Get("impact_tech"), 0.2f);
-            message = on ? "Flashlight on" : "Flashlight off";
-        }
+        // A short line under the damage bill (the event keys use it).
+        public void ShowMessage(string text) => message = text;
 
         public void Announce(string text) => message = text;
 
@@ -287,7 +279,6 @@ namespace FlyAI
 
             // Hold Left Ctrl to sneak: slow and quiet, and the fly notices you less.
             Sneaking = Keyboard.current != null && Keyboard.current.leftCtrlKey.isPressed;
-            if (Keyboard.current != null && Keyboard.current.qKey.wasPressedThisFrame) ToggleFlashlight();
             Walk(transform.forward * (frame.forward * walkSpeed * (Sneaking ? SneakSpeedScale : 1f)), Time.deltaTime);
 
             if (frame.recenter)
@@ -680,7 +671,7 @@ namespace FlyAI
             GUI.Label(new Rect(16, 12, 300, 24), $"Damage bill: ${DamageBill}");
             GUI.Label(new Rect(16, 34, 400, 24), message);
             GUI.Label(new Rect(16, Screen.height - 34, 900, 24),
-                "W/S walk  A/D turn  Hold Ctrl sneak  Q flashlight  Mouse aim  Click swing  Space ping  Space x2 turn 180  Hold Space recenter  Tab debug camera");
+                "W/S walk  A/D turn  Hold Ctrl sneak  Mouse aim  Click swing  Space ping  Space x2 turn 180  Hold Space recenter  R reveal  T event  E reset  M menu  Q quit  Tab debug camera");
 
             var target = view.WorldToScreenPoint(aimPivot.position + aimPivot.forward * swatReach);
             if (target.z > 0f) GUI.Label(new Rect(target.x - 5f, Screen.height - target.y - 11f, 20f, 22f), "+");

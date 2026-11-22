@@ -170,17 +170,20 @@ namespace FlyAI
         // The board's stick sits a quarter turn round: its x is forward-back and its y is turning. F1 swaps them back.
         public static bool StickSwapAxes = true;
         public static float StickForward(Vector2 raw) => (StickSwapAxes ? raw.x : raw.y) * StickForwardSign;
-        // Gravity on the board while it is held upright, which is "look straight ahead". It starts along the yaw axis (held
-        // upright, turning left-right spins the board about it); holding the stick press (or Space) re-sets it to now.
+        // Gravity on the board while the swatter is held straight up, which is "look straight ahead". YawAxis is the board
+        // axis that points up when the swatter is held level (pointing at the screen) and PitchAxis the one across it, so
+        // the swatter's long axis, the one that points up when it is held vertical, is the third. Its sign is learnt the
+        // first time the swatter is held near vertical; holding the stick press (or Space) sets it to however it is held.
         public static Vector3 Upright;
         public static bool HasUpright;
+        public static int LongAxis => 3 - YawAxis - PitchAxis;
         public static void SetUpright(Vector3 g)
         {
             Upright = g.normalized;
             HasUpright = true;
-            PlayerPrefs.SetFloat("FlyAI.UprightX", Upright.x);
-            PlayerPrefs.SetFloat("FlyAI.UprightY", Upright.y);
-            PlayerPrefs.SetFloat("FlyAI.UprightZ", Upright.z);
+            PlayerPrefs.SetFloat("FlyAI.Upright2X", Upright.x);   // "2": the first version saved the level pose by mistake
+            PlayerPrefs.SetFloat("FlyAI.Upright2Y", Upright.y);
+            PlayerPrefs.SetFloat("FlyAI.Upright2Z", Upright.z);
             PlayerPrefs.Save();
         }
 
@@ -205,6 +208,7 @@ namespace FlyAI
         public Vector2 LastStroke;
         float lastSwingAt = -10f;
         float pressStartedAt = -1f;
+        float nextAimTrace;
         bool pressRecentered;
         const float HoldToRecenter = 0.6f;
         readonly System.Collections.Generic.Queue<(float time, Vector2 turn)> recent = new System.Collections.Generic.Queue<(float time, Vector2 turn)>();
@@ -240,6 +244,13 @@ namespace FlyAI
             imu.Take(out var rotation, out var peak);
             // The mouse no longer aims or swings; the sensor does.
             frame.aimDelta = new Vector2(rotation[YawAxis] * YawSign, rotation[PitchAxis] * PitchSign) * Sensitivity;
+            var hasGravity = imu.TryGravity(out var g);
+            if (hasGravity && g.sqrMagnitude > 0.25f)
+            {
+                // Left-right is turning about the real vertical, whichever way the swatter is held: level it is the
+                // YawAxis, upright it is the long axis. Level, this is the same as rotation[YawAxis].
+                frame.aimDelta.x = Vector3.Dot(rotation, g.normalized) * YawSign * Sensitivity;
+            }
             frame.swing = false;
             var now = Time.unscaledTime;
 
@@ -258,16 +269,23 @@ namespace FlyAI
                 pressStartedAt = -1f;
                 pressRecentered = false;
             }
-            if (imu.TryGravity(out var g))
+            if (hasGravity)
             {
+                var axis = LongAxis;
                 if (frame.recenter) SetUpright(g);    // however it is held now becomes straight ahead
-                else if (!HasUpright && Mathf.Abs(g[YawAxis]) > 0.8f)
-                    SetUpright(new Vector3(YawAxis == 0 ? 1 : 0, YawAxis == 1 ? 1 : 0, YawAxis == 2 ? 1 : 0) * Mathf.Sign(g[YawAxis]));   // first time held upright
+                else if (!HasUpright && Mathf.Abs(g[axis]) > 0.8f)
+                    SetUpright(new Vector3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0) * Mathf.Sign(g[axis]));   // first time held vertical
                 var pitch = HasUpright ? PitchFromGravity(g) : float.NaN;
                 if (!float.IsNaN(pitch))
                 {
                     frame.hasPitch = true;
                     frame.pitch = pitch;
+                }
+                if (NetTrace.On && now >= nextAimTrace)
+                {
+                    nextAimTrace = now + 0.5f;
+                    NetTrace.Event($"AIM gravity=({g.x:0.00},{g.y:0.00},{g.z:0.00}) upright={(HasUpright ? $"({Upright.x:0.00},{Upright.y:0.00},{Upright.z:0.00})" : "unset")} " +
+                                   $"tilt={pitch:0} turn={frame.aimDelta.x:0.00} recenter={frame.recenter}");
                 }
             }
             recent.Enqueue((now, frame.aimDelta));
@@ -384,9 +402,9 @@ namespace FlyAI
             ImuSwatter.PitchAxis = Mathf.Clamp(PlayerPrefs.GetInt("FlyAI.PitchAxis", ImuSwatter.PitchAxis), 0, 2);
             ImuSwatter.YawSign = PlayerPrefs.GetFloat("FlyAI.YawSign", ImuSwatter.YawSign) < 0f ? -1f : 1f;
             ImuSwatter.PitchSign = PlayerPrefs.GetFloat("FlyAI.PitchSign", ImuSwatter.PitchSign) < 0f ? -1f : 1f;
-            if (PlayerPrefs.HasKey("FlyAI.UprightX"))
+            if (PlayerPrefs.HasKey("FlyAI.Upright2X"))
             {
-                ImuSwatter.Upright = new Vector3(PlayerPrefs.GetFloat("FlyAI.UprightX"), PlayerPrefs.GetFloat("FlyAI.UprightY"), PlayerPrefs.GetFloat("FlyAI.UprightZ"));
+                ImuSwatter.Upright = new Vector3(PlayerPrefs.GetFloat("FlyAI.Upright2X"), PlayerPrefs.GetFloat("FlyAI.Upright2Y"), PlayerPrefs.GetFloat("FlyAI.Upright2Z"));
                 ImuSwatter.HasUpright = ImuSwatter.Upright.sqrMagnitude > 0.25f;
             }
         }

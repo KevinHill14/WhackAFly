@@ -32,6 +32,8 @@ namespace FlyAI
         const int MaxDust = 450;
         const float PingDuration = 1.2f;
         const float DefaultChairLength = 0.6f;
+        // How much of each theme's fog to use: 0.5 starts it twice as far away and makes the haze half as thick.
+        const float FogAmount = 0.5f;
 
         public static RoomAtmosphere Current { get; private set; }
         public IReadOnlyList<LightRig> Rigs => rigs;
@@ -104,8 +106,8 @@ namespace FlyAI
             noiseSeed = (float)random.NextDouble() * 100f;
 
             // You can see this many chair lengths before things fade into the dark.
-            fogStart = theme.visibleChairLengths * ChairLength(room);
-            fogFade = Mathf.Max(theme.fogFadeDistance, fogStart * 1.6f);
+            fogStart = theme.visibleChairLengths * ChairLength(room) / FogAmount;
+            fogFade = Mathf.Max(theme.fogFadeDistance / FogAmount, fogStart * 1.6f);
             fogClearDistance = (boundsMax - boundsMin).magnitude + ceiling;
             RenderSettings.fogStartDistance = fogStart;
             RenderSettings.fogEndDistance = fogStart + fogFade;
@@ -311,7 +313,7 @@ namespace FlyAI
             spin.z = new ParticleSystem.MinMaxCurve(-0.07f, 0.07f);
 
             hazeColor = Color.Lerp(theme.fog, theme.ceiling, 0.07f);
-            hazeColor.a = theme.hazeOpacity;
+            hazeColor.a = theme.hazeOpacity * FogAmount;
             hazeMaterial = assets.Keep(CreateParticleMaterial(assets.Keep(CreatePuffTexture()), false));
             hazeMaterial.SetColor("_BaseColor", hazeColor);
 

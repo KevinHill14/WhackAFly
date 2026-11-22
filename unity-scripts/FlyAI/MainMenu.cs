@@ -166,7 +166,8 @@ namespace FlyAI
         {
             if (!Active)
             {
-                ImuReceiver.TakePress(); // The stick's press only means something in the menu.
+                // The stick's press only means something in a menu: here, or the result screen at the end of a round.
+                if (GameRound.Current == null || !GameRound.Current.ShowingResult) ImuReceiver.TakePress();
                 return;
             }
             if (Cursor.lockState != CursorLockMode.None) FreeCursor();
@@ -286,7 +287,7 @@ namespace FlyAI
             if (!loader.IsLoading) loader.ReloadScan();
         }
 
-        static void Quit()
+        public static void Quit()
         {
 #if UNITY_EDITOR
             UnityEditor.EditorApplication.isPlaying = false;
@@ -542,25 +543,22 @@ namespace FlyAI
             }
             else
             {
-                var size = Mathf.Min(columnWidth * 0.62f, Screen.height * 0.42f);
+                // Small enough that the text and the Return button below always fit on screen.
+                var size = Mathf.Min(columnWidth * 0.5f, Screen.height * 0.3f);
                 var rect = GUILayoutUtility.GetRect(size, size, GUILayout.ExpandWidth(false));
                 rect.x = (columnWidth - size) * 0.5f;
                 var margin = size * 0.04f;
                 GUI.DrawTexture(new Rect(rect.x - margin, rect.y - margin, size + margin * 2f, size + margin * 2f), Texture2D.whiteTexture);
                 GUI.DrawTexture(rect, qr, ScaleMode.StretchToFill);
                 GUILayout.Space(margin * 2f);
-                GUILayout.Label("Scan this with your phone's camera, then upload the Polycam export (.zip or .glb).", bodyStyle);
-                GUILayout.Label(uploadInfo.url, bodyStyle);
+                GUILayout.Label("Scan with your phone camera, then upload your room scan.", bodyStyle);
             }
 
-            GUILayout.Space(unit * 0.5f);
-            GUILayout.Label(wifiName.Length > 0
-                ? $"This computer is on the Wi-Fi network <b>{wifiName}</b>. Connect your phone to the same one."
-                : "Your phone and this computer must be on the same Wi-Fi network.", bodyStyle);
-            GUILayout.Space(unit * 0.6f);
+            GUILayout.Label(wifiName.Length > 0 ? $"Phone on Wi-Fi: <b>{wifiName}</b>" : "Phone on the same Wi-Fi as this computer", bodyStyle);
+            GUILayout.Space(unit * 0.3f);
 
             var received = levelId.Length > 0 && levelId != uploadStartId;
-            GUILayout.Label(received ? $"<color=#1B7F3A>Received: {levelLabel}   -   ready to play</color>" : "Waiting for an upload...", bodyStyle);
+            GUILayout.Label(received ? $"<color=#1B7F3A>Received: {levelLabel}, ready to play</color>" : "Waiting for an upload...", bodyStyle);
 
             GUILayout.FlexibleSpace();
             if (received)

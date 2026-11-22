@@ -25,7 +25,7 @@ namespace FlyAI
     }
 
     // One round: a 3-2-1 countdown, a 60 second hunt, then a win (the fly is smushed) or a loss (time up).
-    // Reloading the room (R or the Play again button) starts a new round with a new fly.
+    // Reloading the room (the Play again button) starts a new round with a new fly.
     public class GameRound : MonoBehaviour
     {
         public enum Phase { Countdown, Playing, Won, Lost }
@@ -40,6 +40,9 @@ namespace FlyAI
         public bool CanSwing => CurrentPhase == Phase.Playing;
         public bool CanMove => CurrentPhase != Phase.Countdown;
         public bool FlyActive => CurrentPhase == Phase.Playing;
+        public bool ShowingResult => CurrentPhase == Phase.Won || CurrentPhase == Phase.Lost;
+        const int ResultScreen = 100;          // MenuCursor screen id; the main menu uses its own mode numbers
+        const float ResultPressDelay = 0.6f;   // a press already in progress when the round ends must not click Play again
         public bool Finished => CurrentPhase == Phase.Won || CurrentPhase == Phase.Lost;
 
         FlyAgent fly;
@@ -119,6 +122,12 @@ namespace FlyAI
                         End(Phase.Lost);
                         Play("round_lost", 0.9f);
                     }
+                    break;
+                default:
+                    // The thumbstick works the result screen like the main menu: it steps between the buttons, the press selects.
+                    if (MainMenu.Active) break;
+                    if (Time.time - phaseStart < ResultPressDelay) ImuReceiver.TakePress();
+                    else MenuCursor.Tick(sideways: true);
                     break;
             }
         }
@@ -243,8 +252,11 @@ namespace FlyAI
                     break;
 
                 default:
+                    var stick = !MainMenu.Active;   // the menu owns the thumbstick while it is open
+                    var backgroundOnly = stick && MenuCursor.Begin(Event.current, ResultScreen);
                     DrawTimer(width, height);
-                    DrawResult(width, height);
+                    if (!backgroundOnly) DrawResult(width, height, stick);   // a selection just changed the screen
+                    if (stick) MenuCursor.End();
                     break;
             }
         }
@@ -260,7 +272,7 @@ namespace FlyAI
             Shadowed(new Rect(width * 0.5f - 150f, 10f, 300f, height * 0.07f), text, midStyle, color);
         }
 
-        void DrawResult(float width, float height)
+        void DrawResult(float width, float height, bool stick)
         {
             var won = CurrentPhase == Phase.Won;
             var previous = GUI.color;
@@ -288,8 +300,9 @@ namespace FlyAI
             var menu = new Rect(panel.xMax - 260f, panel.yMax - 74f, 240f, 48f);
             UiHit.Set("again", again);
             UiHit.Set("menu", menu);
-            if (GUI.Button(again, "Play again   [R]")) PlayAgain();
-            if (GUI.Button(menu, "Main menu")) OpenMenu();
+            // | rather than ||: MenuCursor.Hit must run for both buttons every pass to keep its count.
+            if (GUI.Button(again, "Play again") | (stick && MenuCursor.Hit(again, preferred: true))) PlayAgain();
+            if (GUI.Button(menu, "Main menu") | (stick && MenuCursor.Hit(menu))) OpenMenu();
         }
     }
 }

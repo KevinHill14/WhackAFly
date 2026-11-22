@@ -6,10 +6,9 @@ using UnityEngine.InputSystem;
 namespace FlyAI
 {
     // Test camera. Hold right mouse to look, WASD to move, Q/E down/up, Shift for speed.
-    // F = fog on/off, B = object outlines, M = props and lights, G = fly landing spots,
-    // V = sound sources, L = rule-based vs AI layout, C = ceiling, R = reload scan,
-    // N = test blackout, U = test power surge, H = test passing headlights, K = test lightning,
-    // hold T = preview fly-nearby tension.
+    // Any time: R = reveal every placement (object outlines, props and lights, fly landing spots, sound sources),
+    // T = trigger the next room event (headlights, lightning, blackout, power surge, then round again).
+    // In the player's view (not this camera, where Q/E fly): E = reset the round, Q = quit the game, M = main menu.
     public class FlyCamera : MonoBehaviour
     {
         public float speed = 3f;
@@ -19,11 +18,6 @@ namespace FlyAI
         float yaw;
         float pitch;
         RoomLoader loader;
-
-        struct Commands
-        {
-            public bool fog, boxes, markers, landing, sound, layout, ceiling, reload, blackout, surge, headlights, lightning, tension;
-        }
 
         void Start()
         {
@@ -40,7 +34,8 @@ namespace FlyAI
 
         void Update()
         {
-            ReadInput(out var move, out var look, out var looking, out var fast, out var commands);
+            ReadInput(out var move, out var look, out var looking, out var fast, out var reveal, out var nextEvent,
+                      out var resetRound, out var quit, out var menu);
 
             if (flightEnabled)
             {
@@ -55,31 +50,26 @@ namespace FlyAI
                 transform.position += Vector3.ClampMagnitude(velocity, 1f) * (speed * (fast ? 2.5f : 1f) * Time.unscaledDeltaTime);
             }
 
-            if (commands.fog) RoomAtmosphere.ToggleFog();
-            if (RoomTension.Current != null) RoomTension.Current.SetDebugHeld(commands.tension);
-            if (RoomEvents.Current != null)
+            if (MainMenu.Active) return;
+            if (nextEvent && RoomEvents.Current != null)
             {
-                if (commands.blackout) RoomEvents.Current.TriggerBlackout();
-                if (commands.surge) RoomEvents.Current.TriggerSurge();
-                if (commands.lightning) RoomEvents.Current.TriggerLightning();
-                if (commands.headlights) RoomEvents.Current.TriggerHeadlights();
+                var name = RoomEvents.Current.TriggerNext();
+                var player = FindFirstObjectByType<PlayerController>();
+                if (player != null) player.ShowMessage(name != null ? $"Event: {name}" : "Event: wait for the last one to finish");
             }
-            if (loader == null) return;
-            if (commands.boxes) loader.ToggleDebugBoxes();
-            if (commands.markers) loader.TogglePlacementMarkers();
-            if (commands.landing) loader.ToggleLandingMarkers();
-            if (commands.sound) loader.ToggleSoundMarkers();
-            if (commands.layout) loader.ToggleLayout();
-            if (commands.ceiling) loader.ToggleCeiling();
-            if (commands.reload) loader.ReloadScan();
+            if (reveal && loader != null) loader.ToggleReveal();
+            if (flightEnabled) return;   // flying this camera, Q and E move it down and up
+            if (resetRound && loader != null) loader.ReloadScan();   // the same as Play again: a new round with a new fly
+            else if (menu) MainMenu.Open();
+            else if (quit) MainMenu.Quit();
         }
 
-        static void ReadInput(out Vector3 move, out Vector2 look, out bool looking, out bool fast, out Commands commands)
+        static void ReadInput(out Vector3 move, out Vector2 look, out bool looking, out bool fast, out bool reveal, out bool nextEvent,
+                              out bool resetRound, out bool quit, out bool menu)
         {
             move = Vector3.zero;
             look = Vector2.zero;
-            looking = fast = false;
-            commands = default;
+            looking = fast = reveal = nextEvent = resetRound = quit = menu = false;
 
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
@@ -90,19 +80,11 @@ namespace FlyAI
                 move.y = (keyboard.eKey.isPressed ? 1 : 0) - (keyboard.qKey.isPressed ? 1 : 0);
                 move.z = (keyboard.wKey.isPressed ? 1 : 0) - (keyboard.sKey.isPressed ? 1 : 0);
                 fast = keyboard.leftShiftKey.isPressed;
-                commands.boxes = keyboard.bKey.wasPressedThisFrame;
-                commands.markers = keyboard.mKey.wasPressedThisFrame;
-                commands.fog = keyboard.fKey.wasPressedThisFrame;
-                commands.blackout = keyboard.nKey.wasPressedThisFrame;
-                commands.surge = keyboard.uKey.wasPressedThisFrame;
-                commands.lightning = keyboard.kKey.wasPressedThisFrame;
-                commands.headlights = keyboard.hKey.wasPressedThisFrame;
-                commands.tension = keyboard.tKey.isPressed;
-                commands.landing = keyboard.gKey.wasPressedThisFrame;
-                commands.sound = keyboard.vKey.wasPressedThisFrame;
-                commands.layout = keyboard.lKey.wasPressedThisFrame;
-                commands.ceiling = keyboard.cKey.wasPressedThisFrame;
-                commands.reload = keyboard.rKey.wasPressedThisFrame;
+                reveal = keyboard.rKey.wasPressedThisFrame;
+                nextEvent = keyboard.tKey.wasPressedThisFrame;
+                resetRound = keyboard.eKey.wasPressedThisFrame;
+                quit = keyboard.qKey.wasPressedThisFrame;
+                menu = keyboard.mKey.wasPressedThisFrame;
             }
             if (mouse != null)
             {
@@ -114,19 +96,11 @@ namespace FlyAI
             move.y = (Input.GetKey(KeyCode.E) ? 1 : 0) - (Input.GetKey(KeyCode.Q) ? 1 : 0);
             move.z = (Input.GetKey(KeyCode.W) ? 1 : 0) - (Input.GetKey(KeyCode.S) ? 1 : 0);
             fast = Input.GetKey(KeyCode.LeftShift);
-            commands.boxes = Input.GetKeyDown(KeyCode.B);
-            commands.markers = Input.GetKeyDown(KeyCode.M);
-            commands.fog = Input.GetKeyDown(KeyCode.F);
-            commands.blackout = Input.GetKeyDown(KeyCode.N);
-            commands.surge = Input.GetKeyDown(KeyCode.U);
-            commands.lightning = Input.GetKeyDown(KeyCode.K);
-            commands.headlights = Input.GetKeyDown(KeyCode.H);
-            commands.tension = Input.GetKey(KeyCode.T);
-            commands.landing = Input.GetKeyDown(KeyCode.G);
-            commands.sound = Input.GetKeyDown(KeyCode.V);
-            commands.layout = Input.GetKeyDown(KeyCode.L);
-            commands.ceiling = Input.GetKeyDown(KeyCode.C);
-            commands.reload = Input.GetKeyDown(KeyCode.R);
+            reveal = Input.GetKeyDown(KeyCode.R);
+            nextEvent = Input.GetKeyDown(KeyCode.T);
+            resetRound = Input.GetKeyDown(KeyCode.E);
+            quit = Input.GetKeyDown(KeyCode.Q);
+            menu = Input.GetKeyDown(KeyCode.M);
             looking = Input.GetMouseButton(1);
             look = new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y")) * 20f;
 #endif

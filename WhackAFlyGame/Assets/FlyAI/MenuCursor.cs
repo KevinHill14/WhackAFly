@@ -48,19 +48,27 @@ namespace FlyAI
             heldDirection = 0;
         }
 
-        // Called every frame while the menu is open.
-        public static void Tick()
+        // Called every frame while the menu is open. sideways: left and right step too, for buttons laid out in a row.
+        public static void Tick(bool sideways = false)
         {
             if (RequireFocus && !Application.isFocused)
             {
                 ImuReceiver.TakePress();
                 return;
             }
-            var y = ImuSwatter.StickForward(ImuReceiver.LiveStick);
+            var stick = ImuReceiver.LiveStick;
+            var y = ImuSwatter.StickForward(stick);
             var direction = y > PushAt ? -1 : y < -PushAt ? 1 : 0;   // Up the screen is toward the first item.
+            var amount = Mathf.Abs(y);
+            if (sideways)
+            {
+                var x = ImuSwatter.StickTurn(stick);
+                if (direction == 0) direction = x > PushAt ? 1 : x < -PushAt ? -1 : 0;   // Right is toward the next item.
+                amount = Mathf.Max(amount, Mathf.Abs(x));
+            }
             if (direction == 0)
             {
-                if (Mathf.Abs(y) < ReleaseAt) heldDirection = 0;
+                if (amount < ReleaseAt) heldDirection = 0;
             }
             else if (direction != heldDirection)
             {

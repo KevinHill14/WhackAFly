@@ -10,7 +10,8 @@
 #   SUBNET=brain/subnet/subnet_t10.npz   which brain size to use (t5 / t10 / t20)
 #   BRAIN_MODE=auto                      auto, live or fallback
 #   BRAIN_PORT=8765  BACKEND_PORT=8766  UDP_PORT=9000
-#   RT_PRIORITY=20                       QNX real-time priority (0 = leave at the default)
+#   RT_PRIORITY=0                        QNX real-time priority (0 = leave at the default of 10). 20 starved
+#                                        Wi-Fi and the system on the Pi 5 until it froze, so it is off by default.
 #   PRACTICE=1                           free play: no countdown or timer, the fly respawns
 #   ESP32_PORT=8767                      WebSocket port the swatter streams its IMU samples to
 #
@@ -25,7 +26,7 @@ BRAIN_PORT=${BRAIN_PORT:-8765}
 BACKEND_PORT=${BACKEND_PORT:-8766}
 UDP_PORT=${UDP_PORT:-9000}
 ESP32_PORT=${ESP32_PORT:-8767}
-RT_PRIORITY=${RT_PRIORITY:-20}
+RT_PRIORITY=${RT_PRIORITY:-0}
 mkdir -p "$RUN"
 
 port_open() {  # port_open PORT -> 0 if something accepts connections

@@ -250,14 +250,14 @@ namespace FlyAI
         void OnGUI()
         {
             if (MainMenu.Active || FlyAgent.Current == null) return;
-            if (small == null) small = new GUIStyle(GUI.skin.label) { fontSize = 12, richText = true };
+            if (small == null) small = new GUIStyle(GUI.skin.label) { fontSize = 10, richText = true };
 
             var button = new Rect(Screen.width - 166f, Screen.height - 42f, 150f, 28f);
             UiHit.Set("neural", button);
             if (GUI.Button(button, open ? "Neural net  [X] hide" : "Neural net  [X] show")) open = !open;
             if (!open) return;
 
-            var size = Mathf.Min(Screen.height * 0.52f, 440f);
+            var size = Mathf.Min(Screen.height * 0.26f, 220f);
             var panel = new Rect(Screen.width - size - 16f, Screen.height - size - 50f, size, size);
             if (head == null || glow == null)
             {
@@ -277,13 +277,6 @@ namespace FlyAI
                 GUI.DrawTexture(new Rect(centre.x - radius, centre.y - radius, radius * 2f, radius * 2f), dot);
             }
             GUI.color = previous;
-
-            small.normal.textColor = new Color(0.9f, 0.92f, 0.95f);
-            GUI.Label(new Rect(panel.x + 14f, panel.y + 8f, size, 20f), $"Fly brain: {glow.Length:N0} neurons", small);
-            GUI.Label(new Rect(panel.xMax - 130f, panel.y + 8f, 120f, 20f), $"<color=#FF6A5A>{firing} firing</color>", small);
-            GUI.Label(new Rect(panel.x + 12f, panel.y + size * 0.72f, size * 0.3f, 36f), "Left eye\n(looming)", small);
-            GUI.Label(new Rect(panel.xMax - size * 0.3f, panel.y + size * 0.72f, size * 0.3f, 36f), "Right eye\n(looming)", small);
-            GUI.Label(new Rect(panel.center.x + size * 0.1f, panel.y + size * 0.72f, size * 0.4f, 36f), "Neck: escape\nneurons", small);
         }
     }
 }

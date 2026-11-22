@@ -427,7 +427,7 @@ namespace FlyAI
             }
             if (count == 0) lines[n++] = error.Length > 0 ? "" : "No scores yet.";
             lines[n++] = "";
-            lines[n++] = "<color=#9AA39A>R to play again, Esc to hide</color>";
+            lines[n++] = "<color=#9AA39A>Esc to hide</color>";
             Array.Resize(ref lines, n);
             return lines;
         }
