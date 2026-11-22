@@ -145,7 +145,7 @@ async def end_to_end():
     py = sys.executable
     brain = subprocess.Popen([py, str(ROOT / "brain/server.py"), "--mode", "fallback", "--port", "18765"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--practice", "--port", "18766", "--udp-port", "19000",
+    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--classifier", "threshold", "--practice", "--port", "18766", "--udp-port", "19000",
                              "--brain", "ws://127.0.0.1:18765"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         await asyncio.sleep(2)
@@ -215,7 +215,7 @@ async def e2e_rounds():
     py = sys.executable
     brain = subprocess.Popen([py, str(ROOT / "brain/server.py"), "--mode", "auto", "--port", "18775"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--port", "18776", "--udp-port", "19010",
+    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--classifier", "threshold", "--port", "18776", "--udp-port", "19010",
                              "--countdown-seconds", "1", "--round-seconds", "4", "--brain", "ws://127.0.0.1:18775"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -281,7 +281,7 @@ async def stream_esp(sock, seconds, swing_at=None, t0=0):
 async def e2e_swatter():
     print("end to end: swatter stream over WebSocket")
     py = sys.executable
-    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--practice", "--port", "18795", "--esp-port", "18796",
+    back = subprocess.Popen([py, str(ROOT / "backend/server.py"), "--classifier", "threshold", "--practice", "--port", "18795", "--esp-port", "18796",
                              "--udp-port", "19030", "--brain", "ws://127.0.0.1:18799"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         await asyncio.sleep(1.5)

@@ -130,7 +130,6 @@ namespace FlyAI
             Play("whistle", 1f);
             Say("announce_go"); // silent unless a recording exists
             if (fly != null) fly.OnRoundStart();
-            else BackendClient.StartRemoteHunt();
         }
 
         // Called by the fly when it is swatted.

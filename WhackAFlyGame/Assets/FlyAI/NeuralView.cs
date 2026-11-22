@@ -73,8 +73,9 @@ namespace FlyAI
             if (keyboard != null && keyboard.xKey.wasPressedThisFrame && !MainMenu.Active) open = !open;
 
             var client = FlyAgent.BrainClient;
-            if (client != null && client.NeuronGroups != null && (groupIds == null || groupIds.Length != client.NeuronGroups.Length))
-                Build(client.NeuronGroups, client.GroupNames);
+            var ids = BackendClient.Driving ? BackendClient.NeuronGroups : client?.NeuronGroups;
+            var names = BackendClient.Driving ? BackendClient.GroupNames : client?.GroupNames;
+            if (ids != null && names != null && (groupIds == null || groupIds.Length != ids.Length)) Build(ids, names);
 
             if (glow == null) return;
             var count = 0;

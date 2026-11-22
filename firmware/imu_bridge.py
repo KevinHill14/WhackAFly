@@ -9,6 +9,8 @@ Every ~16 ms a UDP JSON packet goes to Unity (default 127.0.0.1:9100):
      "g":[x,y,z],   latest gyro, rad/s
      "l":[x,y,z],   latest linear acceleration, m/s^2
      "lp":float,    PEAK |linear acceleration| since the last packet (so no swing is missed)
+     "s":[x,y],     thumbstick, -1 to 1 (walk and turn, and the menu cursor)
+     "b":0 or 1,    thumbstick pressed at any point since the last packet (the menu's select button)
      "n":int}       samples in this packet
 
   python firmware/imu_bridge.py                 find the port, run, forward to Unity
@@ -26,6 +28,9 @@ import time
 
 GYRO_DEADZONE = 0.04   # rad/s
 PAIR = re.compile(r"(lx|ly|lz|gx|gy|gz):(-?[0-9.]+)")
+STICK = re.compile(r"\bsx:(-?[0-9.]+) sy:(-?[0-9.]+)(?: sb:([01]))?")
+stick = [0.0, 0.0]     # latest thumbstick reading
+press = [0, 0]         # thumbstick button: now, and pressed since the last packet
 
 
 def find_port():
@@ -53,6 +58,11 @@ def serial_samples(port):
             line, buf = buf.split(b"\n", 1)
             text = line.decode("ascii", "ignore")
             kv = dict(PAIR.findall(text))
+            m = STICK.search(text)
+            if m:
+                stick[0], stick[1] = float(m.group(1)), float(m.group(2))
+                press[0] = int(m.group(3) or 0)
+                press[1] |= press[0]
             if len(kv) == 6:
                 got = True
                 yield [float(kv[k]) for k in ("lx", "ly", "lz", "gx", "gy", "gz")]
@@ -113,8 +123,9 @@ def main():
                     print(f"  gyro {gx:+.2f} {gy:+.2f} {gz:+.2f} rad/s   accel {mag:5.1f} m/s^2   samples {total}")
             if now - last_send >= 1 / 60:
                 if not args.check:
-                    pkt = {"dg": dg, "g": [gx, gy, gz], "l": [lx, ly, lz], "lp": peak, "n": count}
+                    pkt = {"dg": dg, "g": [gx, gy, gz], "l": [lx, ly, lz], "lp": peak, "s": stick, "b": press[1], "n": count}
                     sock.sendto(json.dumps(pkt).encode(), dest)
+                    press[1] = press[0]
                 last_send = now
                 dg = [0.0, 0.0, 0.0]
                 peak = 0.0

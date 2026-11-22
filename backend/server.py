@@ -20,15 +20,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ws  # noqa: E402  (brain/ws.py, stdlib WebSocket)
 import qnx  # noqa: E402  (QNX scheduling, slog2 logging, timing)
-from gesture import ThresholdClassifier, make_classifier, parse_sample  # noqa: E402
-from game import FlyGame, TICK_HZ, SWAT_REACH  # noqa: E402
+from gesture import ControllerState, ThresholdClassifier, make_classifier, parse_controller, parse_sample  # noqa: E402
+from game import TICK_HZ, SWAT_REACH  # noqa: E402
+from fly import AdvancedGame  # noqa: E402
 
 LOOMING_HZ = 20
+CONTROLLER_HZ = 60
+MAX_CLIENT_BACKLOG = 32 * 1024   # bytes queued for one Unity client, about a second of messages
 
 
 class Backend:
     def __init__(self, brain_url, rounds=True, countdown_s=3.0, round_s=60.0):
-        self.game = FlyGame(rounds=rounds, countdown_s=countdown_s, round_s=round_s)
+        self.game = AdvancedGame(rounds=rounds, countdown_s=countdown_s, round_s=round_s)
+        self.controller = ControllerState()
+        self.brain_groups = None               # neuron map for Unity's neural view
         self.brain_url = brain_url
         self.ext_looming = None                # (value, side, time) sent by Unity's own senses
         self.brain_status = {}                 # latest status reply from the brain
@@ -47,14 +52,26 @@ class Backend:
         self.next_id = 0
 
     async def send_all(self, msg):
-        text = json.dumps(msg, separators=(",", ":"))
-        for c in list(self.clients):
-            try:
-                # A stalled client must not hold up the game for everyone else.
-                await asyncio.wait_for(c.send(text), 0.25)
-            except (ws.ConnectionClosed, asyncio.TimeoutError, OSError):
-                self.clients.discard(c)
-                await c.close()
+        await self.send_text(json.dumps(msg, separators=(",", ":")))
+
+    async def send_text(self, text):
+        clients = list(self.clients)
+        if len(clients) == 1:
+            await self.send_one(clients[0], text)
+        elif clients:
+            await asyncio.gather(*(self.send_one(c, text) for c in clients))   # A slow client delays nobody else's send.
+
+    async def send_one(self, client, text):
+        # Too much unsent data means this client stopped reading: drop it at once instead of waiting on it.
+        if client.writer.transport.get_write_buffer_size() > MAX_CLIENT_BACKLOG:
+            self.clients.discard(client)
+            client.abort()
+            return
+        try:
+            await asyncio.wait_for(client.send(text), 0.25)
+        except (ws.ConnectionClosed, asyncio.TimeoutError, OSError):
+            self.clients.discard(client)
+            client.abort()
 
     # ---- Unity connection ----------------------------------------------
     async def on_client(self, sock, path):
@@ -62,10 +79,13 @@ class Backend:
         qnx.log(qnx.SLOG_INFO, f"Unity connected from {sock.peer}")
         await sock.send(json.dumps({"type": "hello", "tick_hz": TICK_HZ,
                                     "brain": self.brain is not None}))
+        if self.brain_groups:
+            await sock.send(self.brain_groups)
         try:
             while True:
+                raw = await sock.recv()       # Outside the try: a failed connection is not a bad message.
                 try:
-                    msg = json.loads(await sock.recv())
+                    msg = json.loads(raw)
                     if isinstance(msg, dict):
                         await self.handle(msg)
                 except json.JSONDecodeError:
@@ -76,6 +96,7 @@ class Backend:
             pass
         finally:
             self.clients.discard(sock)
+            sock.abort()
             qnx.log(qnx.SLOG_INFO, "Unity disconnected")
 
     async def send_brain(self, msg, track=False):
@@ -98,9 +119,12 @@ class Backend:
     async def handle(self, m):
         t = m.get("type")
         if t == "room":
-            self.game.set_room(m.get("landingSpots", []), m.get("head"))
-            await self.send_brain({"type": "reset"})        # a new room is a new round: clear the fly's senses
-            self.ext_looming = None
+            fresh = self.game.set_room(m.get("landingSpots", []), m.get("head"), m.get("air"), m.get("links"),
+                                       m.get("spotAir"), m.get("ceiling"), m.get("resume") is True, m.get("playing") is True,
+                                       m.get("hold") is True)
+            if fresh:
+                await self.send_brain({"type": "reset"})    # a new room is a new round: clear the fly's senses
+                self.ext_looming = None
             qnx.log(qnx.SLOG_INFO, f"room loaded: {len(self.game.spots)} landing spots")
         elif t == "pose":
             now = time.monotonic()
@@ -109,8 +133,18 @@ class Backend:
             self.last_pose = now
         elif t == "swing":
             hit = self.game.swing(m["origin"], m["dir"], m.get("strength", 0.6),
-                                  m.get("reach", SWAT_REACH), m.get("dirs"))
+                                  m.get("reach", SWAT_REACH), m.get("dirs"), m.get("threat") is True)
             await self.send_all({"type": "swing_result", "hit": hit, "score": self.game.score})
+        elif t == "hunt":                                    # Unity's 3-2-1 is over
+            self.game.set_difficulty(m.get("level", 1))
+            self.game.roll_personality()
+            self.game.start_hunt()
+            await self.send_brain({"type": "reset"})
+            self.ext_looming = None
+        elif t == "swat":                                    # Unity saw the swatter land on the fly
+            self.game.swat()
+        elif t == "senses":
+            self.game.set_senses(m)
         elif t == "reset":
             self.game.reset()
             if m.get("start"):
@@ -128,7 +162,7 @@ class Backend:
             if not self.game.active():
                 pass
             elif m.get("kind", "looming") == "sound":
-                await self.send_brain({"type": "sound", "value": value, "side": side}, track=True)
+                self.game.hear(value, side)
             else:
                 self.ext_looming = (value, side, time.monotonic())
         elif t == "brain_mode":                              # live / fallback / auto, e.g. for a failover demo
@@ -167,12 +201,14 @@ class Backend:
             while True:
                 raw = await sock.recv()
                 try:
-                    t, accel, gyro = parse_sample(json.loads(raw))
+                    sample = json.loads(raw)
+                    t, accel, gyro = parse_sample(sample)
                 except (ValueError, TypeError, RecursionError):
                     self.esp_bad += 1                # a bad sample is dropped, never fatal
                     continue
                 self.esp_last = time.monotonic()
                 self.esp_count += 1
+                self.controller.update(t if t is not None else qnx.now_ms(), gyro, *parse_controller(sample))
                 for action in self.classifier.update(t if t is not None else qnx.now_ms(), accel, gyro):
                     await self.send_all({"type": "swatter", **action})
         except ws.ConnectionClosed:
@@ -199,8 +235,19 @@ class Backend:
                 elif state == "ok":
                     qnx.log(qnx.SLOG_INFO, "swatter link up")
                     self.classifier.reset()          # the gravity estimate is stale after a gap
+                    self.controller.reset()
                 self.esp_link = state
                 await self.send_all({"type": "event", "kind": "swatter_link", "state": state})
+
+    async def controller_loop(self):
+        """Aim, thumbstick and press go to Unity 60 times a second while the swatter is connected."""
+        while True:
+            await asyncio.sleep(1 / CONTROLLER_HZ)
+            if self.esp_link == "ok" and self.clients:
+                try:
+                    await self.send_all(self.controller.take())
+                except Exception as e:
+                    qnx.log(qnx.SLOG_ERROR, f"controller loop error: {e!r}", every=5, key="controller-error")
 
     # ---- ESP32 over UDP -------------------------------------------------
     def udp_protocol(self):
@@ -232,6 +279,15 @@ class Backend:
                     if isinstance(m, dict) and m.get("type") in ("status", "mode_ok"):
                         was = self.brain_status.get("source")
                         self.brain_status = {k: m.get(k) for k in ("mode", "source", "live_available", "live_healthy", "switches") if k in m}
+                        if m.get("type") == "status":
+                            if m.get("neuron_groups") and m.get("group_names") and not self.brain_groups:
+                                self.brain_groups = json.dumps({"type": "brain_groups", "neuron_groups": m["neuron_groups"],
+                                                                "group_names": m["group_names"]}, separators=(",", ":"))
+                                await self.send_text(self.brain_groups)
+                            e = m.get("efficacy") or {}
+                            await self.send_all({"type": "brain_status", "mode": m.get("mode"), "source": m.get("source"),
+                                                 "neurons": m.get("neurons", 0),
+                                                 "efficacy": [e.get(k, 1.0) for k in ("eye_left", "eye_right", "ear_left", "ear_right")]})
                         if was and m.get("source") and was != m["source"]:
                             qnx.log(qnx.SLOG_WARNING, f"brain switched from {was} to {m['source']}")
                     if isinstance(m, dict) and m.get("type") == "escape":
@@ -243,6 +299,8 @@ class Backend:
                                 qnx.log(qnx.SLOG_WARNING, f"slow brain reply: {rtt:.0f} ms", every=5, key="slow-brain")
                         self.game.spikes = m.get("spikes")
                         self.game.on_escape(float(m.get("strength", 0.0)), m.get("side", "right"))
+                        await self.send_all({"type": "brain", "strength": m.get("strength", 0.0), "side": m.get("side", "right"),
+                                             "spikes": m.get("spikes") or [], "active": m.get("active") or []})
             except Exception as e:      # a brain problem must never stop the game
                 if not isinstance(e, (ws.ConnectionClosed, ConnectionError, OSError, asyncio.TimeoutError)):
                     qnx.log(qnx.SLOG_ERROR, f"brain error: {e!r}", every=5, key="brain-error")
@@ -269,6 +327,8 @@ class Backend:
                 if n % (LOOMING_HZ * 2) == 0:                  # refresh live/fallback status every 2 s
                     await self.send_brain({"type": "status"})
                 if self.brain is not None:
+                    loud, ear = self.game.sound()                # sent together, so the brain makes one decision
+                    await self.send_brain({"type": "sound", "value": loud, "side": ear})
                     await self.send_brain({"type": "looming", "value": value, "side": side}, track=True)
                 elif value > 0.6:
                     # No brain: crude fallback so the game still plays.
@@ -289,6 +349,7 @@ class Backend:
                     snap = self.game.snapshot()
                     snap["brain"] = self.brain_status.get("source")        # "live", "fallback" or None
                     snap["swatter"] = self.esp_link                        # "never", "ok" or "lost"
+                    snap["classifier"] = self.classifier.name
                     await self.send_all(snap)
                     for e in self.game.events:
                         await self.send_all({"type": "event", **e})
@@ -314,8 +375,8 @@ async def main():
     p.add_argument("--round-seconds", type=float, default=60.0, help="length of the hunt")
     p.add_argument("--countdown-seconds", type=float, default=3.0, help="length of the 3-2-1 countdown")
     p.add_argument("--rt-priority", type=int, default=20, help="QNX real-time priority, 0 to leave unchanged")
-    p.add_argument("--classifier", default=os.environ.get("SWATTER_CLASSIFIER", "threshold"),
-                   choices=["threshold", "model"], help="swing detection: firmware rules or the trained model")
+    p.add_argument("--classifier", default=os.environ.get("SWATTER_CLASSIFIER", "model"),
+                   choices=["threshold", "model"], help="swing detection: the trained model (default) or the firmware's rules")
     p.add_argument("--model", default=os.environ.get("SWATTER_MODEL"), help="model folder (default swatter_ml/models/latest)")
     a = p.parse_args()
     b = Backend(a.brain, rounds=not a.practice, countdown_s=a.countdown_seconds, round_s=a.round_seconds)
@@ -327,7 +388,7 @@ async def main():
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(b.udp_protocol, local_addr=(a.host, a.udp_port))
     qnx.log(qnx.SLOG_NOTICE, f"listening: Unity ws://{a.host}:{a.port}  ESP32 stream ws://{a.host}:{a.esp_port}  ESP32 events udp://{a.host}:{a.udp_port}  brain {a.brain}")
-    await asyncio.gather(b.brain_loop(), b.looming_loop(), b.tick_loop(), b.link_loop())
+    await asyncio.gather(b.brain_loop(), b.looming_loop(), b.tick_loop(), b.link_loop(), b.controller_loop())
 
 
 if __name__ == "__main__":

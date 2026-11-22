@@ -95,7 +95,7 @@ namespace FlyAI
                 Round(style, Rounded(fill, radius), null, radius);
                 cache[key] = style;
             }
-            GUI.Box(rect, GUIContent.none, style);
+            if (Event.current.type == EventType.Repaint) style.Draw(rect, false, false, false, false);
         }
 
         // A card with a faint edge.

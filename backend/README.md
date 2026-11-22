@@ -1,6 +1,6 @@
 # Game backend (QNX Pi)
 
-Runs the fly: where it sits, when it hops, how it escapes, the score. Unity on
+Runs the full fly (`fly.py`: personality, perching, walking, flight, senses), the trained swing model, and the live stream of the swatter's aim and thumbstick, plus the score. Unity on
 the laptop renders the room and sends the player's pose and swings. The brain
 (`brain/server.py`) decides how the fly escapes. Stdlib-only Python 3.
 
@@ -31,7 +31,7 @@ python3 backend/test_backend.py           # tests (starts both itself, uses fall
 
 If the brain is not running, the backend still plays: the fly just escapes by a
 simple rule. Unity finds the backend through `FLYAI_BACKEND` (default
-`ws://127.0.0.1:8766`); set it to `ws://<pi-ip>:8766` before launching Unity.
+`ws://172.20.10.10:8766`, the Pi on the Samsung Smart Fridge hotspot); set it to `ws://127.0.0.1:8766` to test against a local backend.
 
 QNX features used (real-time priority, `slog2` logging, deadline stats) are listed in
 `backend/QNX_FEATURES.md`. Send `{"type":"stats"}` to get tick and brain timing figures.

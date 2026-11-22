@@ -200,7 +200,9 @@ def replay_takes(clf, takes):
             clf.update(r[0], r[1:4], r[4:7])
         got = max(preds, key=lambda p: p["conf"])["label"] if preds else "idle"
         total += 1
-        right += got == t["label"]
+        # A two-class model says "swing" or "idle", so the recorded label is compared on those terms.
+        want = t["label"] if t["label"] in clf.labels else ("swing" if t["label"] in SWING_KINDS else "idle")
+        right += got == want
         decision += (got in SWING_KINDS) == (t["label"] in SWING_KINDS)
         conf.setdefault(t["label"], Counter())[got] += 1
     clf.on_prediction = None
@@ -234,7 +236,7 @@ def main():
               f"{decision}/{total} right swing-or-not decision ({100.0 * decision / max(1, total):.1f}%)")
         labels = clf.labels
         print("true \\ predicted " + " ".join(f"{l[:7]:>7}" for l in labels))
-        for l in labels:
+        for l in sorted(conf):
             row = conf.get(l, {})
             print(f"{l:<17}" + " ".join(f"{row.get(m, 0):>7}" for m in labels))
         return

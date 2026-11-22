@@ -14,6 +14,8 @@ namespace FlyAI
         public float[] g;  // Latest gyro, rad/s.
         public float[] l;  // Latest linear acceleration (gravity removed), m/s^2.
         public float lp;   // Peak |linear acceleration| since the last packet.
+        public float[] s;  // Thumbstick x, y (-1 to 1).
+        public int b;      // Thumbstick pressed.
         public int n;
     }
 
@@ -31,6 +33,47 @@ namespace FlyAI
         public Vector3 Linear;   // m/s^2
         public float Peak;       // Latest packet's peak acceleration.
         public int Packets;
+        Vector2 stick;
+        bool stickDown;
+        bool pressWaiting;
+
+        // The thumbstick now, or zero if the board has stopped sending, so the player never keeps walking on their own.
+        public static ImuReceiver Current { get; private set; }
+        public static Vector2 LiveStick => Current != null ? Current.StickValue : Vector2.zero;
+        // True once per press. The menu reads this; during a round it is drained, so a press there cannot click the menu later.
+        public static bool IsLive => Current != null && Current.Live;
+        public bool FromNetwork { get; private set; }
+
+        // The same readings, arriving from the Pi over Wi-Fi instead of from the USB bridge.
+        public void FeedNetwork(float[] turn, float[] gyro, float[] stickXY, int pressed)
+        {
+            if (turn == null || turn.Length < 3) return;
+            lock (gate)
+            {
+                FromNetwork = true;
+                pendingRotation += new Vector3(turn[0], turn[1], turn[2]) * Mathf.Rad2Deg;
+                if (gyro != null && gyro.Length >= 3) Gyro = new Vector3(gyro[0], gyro[1], gyro[2]);
+                if (stickXY != null && stickXY.Length >= 2) stick = new Vector2(stickXY[0], stickXY[1]);
+                if (pressed == 1 && !stickDown) pressWaiting = true;
+                stickDown = pressed == 1;
+                Packets++;
+                lastPacketAt = Clock.Elapsed.TotalSeconds;
+            }
+        }
+
+        public static bool TakePress() => Current != null && Current.TakeOwnPress();
+
+        bool TakeOwnPress()
+        {
+            lock (gate)
+            {
+                var waiting = pressWaiting;
+                pressWaiting = false;
+                return waiting;
+            }
+        }
+
+        public Vector2 StickValue { get { lock (gate) return Live ? stick : Vector2.zero; } }
         public string Error = "";
 
         // Packets arrive on another thread, so the time comes from a stopwatch, not Time.
@@ -39,6 +82,7 @@ namespace FlyAI
 
         public ImuReceiver()
         {
+            Current = this;
             try
             {
                 udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, Port));
@@ -64,6 +108,9 @@ namespace FlyAI
                         Gyro = new Vector3(packet.g[0], packet.g[1], packet.g[2]);
                         Linear = new Vector3(packet.l[0], packet.l[1], packet.l[2]);
                         Peak = Mathf.Max(packet.lp, Peak * 0.92f); // Held and faded so the panel is readable.
+                        if (packet.s != null && packet.s.Length >= 2) stick = new Vector2(packet.s[0], packet.s[1]);
+                        if (packet.b == 1 && !stickDown) pressWaiting = true;
+                        stickDown = packet.b == 1;
                         Packets++;
                         lastPacketAt = Clock.Elapsed.TotalSeconds;
                     }
@@ -87,6 +134,7 @@ namespace FlyAI
         public void Dispose()
         {
             running = false;
+            if (Current == this) Current = null;
             try { udp?.Close(); } catch (Exception) { }
         }
     }
@@ -100,6 +148,7 @@ namespace FlyAI
         public static int YawAxis = 2, PitchAxis = 1;  // Which device gyro axis turns left/right and up/down.
         public static float YawSign = 1f, PitchSign = 1f;
         public static float Sensitivity = 1f;
+        public static float StickForwardSign = 1f, StickTurnSign = 1f;  // F3 / F4 flip them; remembered between runs.
         // Directional swings: the swatter sweeps the way the real swing went (F5 in the sensor panel turns it off).
         public static bool Directional = true;
         public static float StrokeWindow = 0.1f;      // seconds of rotation that say which way the swing is going
@@ -134,6 +183,10 @@ namespace FlyAI
         public SwatterFrame Read()
         {
             var frame = Keyboard.Read();
+            if (!imu.Live) return frame; // The swatter is gone: the mouse and keyboard carry on.
+            var modelSwing = frame.swing && imu.FromNetwork; // Over Wi-Fi, the trained model on the Pi decides what is a swing.
+            var modelStrength = frame.swingStrength;
+            var modelStroke = frame.swingStroke;
             imu.Take(out var rotation, out var peak);
             // The mouse no longer aims or swings; the sensor does.
             frame.aimDelta = new Vector2(rotation[YawAxis] * YawSign, rotation[PitchAxis] * PitchSign) * Sensitivity;
@@ -141,7 +194,20 @@ namespace FlyAI
             var now = Time.unscaledTime;
             recent.Enqueue((now, frame.aimDelta));
             while (recent.Count > 0 && now - recent.Peek().time > StrokeWindow) recent.Dequeue();
-            if (peak > SwingThreshold && now - lastSwingAt > 0.5f) // One swing per shake, not one per packet.
+            if (imu.FromNetwork)
+            {
+                if (modelSwing)
+                {
+                    lastSwingAt = now;
+                    frame.swing = true;
+                    frame.swingStrength = modelStrength;
+                    var fromTurn = StrokeFromTurn(SumRecent(), modelStrength);
+                    frame.swingStroke = fromTurn != Vector2.zero ? fromTurn : modelStroke;
+                    LastStroke = frame.swingStroke;
+                    Swings++;
+                }
+            }
+            else if (peak > SwingThreshold && now - lastSwingAt > 0.5f) // One swing per shake, not one per packet.
             {
                 lastSwingAt = now;
                 frame.swing = true;
@@ -201,6 +267,7 @@ namespace FlyAI
         }
 
         bool autoOn;
+        bool showPanel;
 
         void SetSensorControl(bool on)
         {
@@ -218,7 +285,12 @@ namespace FlyAI
             }
         }
 
-        void Awake() => imu = new ImuReceiver();
+        void Awake()
+        {
+            imu = new ImuReceiver();
+            ImuSwatter.StickForwardSign = PlayerPrefs.GetFloat("FlyAI.StickForward", 1f) < 0f ? -1f : 1f;
+            ImuSwatter.StickTurnSign = PlayerPrefs.GetFloat("FlyAI.StickTurn", 1f) < 0f ? -1f : 1f;
+        }
         void OnDestroy() => imu?.Dispose();
 
         void Update()
@@ -237,6 +309,9 @@ namespace FlyAI
             }
             if (keys == null) return;
             if (keys.f10Key.wasPressedThisFrame) SetSensorControl(swatter == null);
+            if (keys.f2Key.wasPressedThisFrame) showPanel = !showPanel;
+            if (keys.f3Key.wasPressedThisFrame) PlayerPrefs.SetFloat("FlyAI.StickForward", ImuSwatter.StickForwardSign = -ImuSwatter.StickForwardSign);
+            if (keys.f4Key.wasPressedThisFrame) PlayerPrefs.SetFloat("FlyAI.StickTurn", ImuSwatter.StickTurnSign = -ImuSwatter.StickTurnSign);
             if (keys.f5Key.wasPressedThisFrame) ImuSwatter.Directional = !ImuSwatter.Directional;
             if (keys.f6Key.wasPressedThisFrame) ImuSwatter.YawAxis = (ImuSwatter.YawAxis + 1) % 3;
             if (keys.f7Key.wasPressedThisFrame) ImuSwatter.PitchAxis = (ImuSwatter.PitchAxis + 1) % 3;
@@ -249,7 +324,7 @@ namespace FlyAI
 
         void OnGUI()
         {
-            if (imu == null || imu.Packets == 0) return; // Nothing connected: stay out of the way.
+            if (!showPanel || imu == null || imu.Packets == 0) return; // Hidden unless F2 opens it.
             if (style == null) style = new GUIStyle(GUI.skin.label) { fontSize = 13, richText = true };
             var peak = imu.Peak;
             var axes = "xyz";
@@ -257,7 +332,7 @@ namespace FlyAI
                        $"gyro  x {imu.Gyro.x,6:0.00}  y {imu.Gyro.y,6:0.00}  z {imu.Gyro.z,6:0.00} rad/s\n" +
                        $"accel {imu.Linear.magnitude,5:0.0} m/s²   peak {peak,5:0.0}   swing above {ImuSwatter.SwingThreshold:0} (F11/F12)\n" +
                        "sensor control: " + (swatter != null ? "<color=#6f6>ON</color>" : "off") + " (F10)   yaw = gyro " + axes[ImuSwatter.YawAxis] + (ImuSwatter.YawSign < 0 ? " flipped" : "") + " (F6/F8)   pitch = gyro " + axes[ImuSwatter.PitchAxis] + (ImuSwatter.PitchSign < 0 ? " flipped" : "") + " (F7/F9)\n" +
-                       "swings " + (swatter != null ? swatter.Swings : 0) + (Time.time - lastSwingAt < 0.6f ? "   <color=#ff6><b>SWING!</b></color>" : "") + "\n" +
+                       $"stick x {imu.StickValue.x:0.00} y {imu.StickValue.y:0.00} (F3/F4 flip)   swings " + (swatter != null ? swatter.Swings : 0) + (Time.time - lastSwingAt < 0.6f ? "   <color=#ff6><b>SWING!</b></color>" : "") + "\n" +
                        "directional swings " + (ImuSwatter.Directional ? "<color=#6f6>ON</color>" : "off") + " (F5)   last swing " + (swatter != null && swatter.Swings > 0 ? ImuSwatter.Describe(swatter.LastStroke) : "-");
             var rect = new Rect(12f, Screen.height * 0.5f - 40f, 640f, 110f);
             GUI.color = new Color(0f, 0f, 0f, 0.6f);

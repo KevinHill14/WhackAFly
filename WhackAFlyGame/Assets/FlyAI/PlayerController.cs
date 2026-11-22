@@ -267,7 +267,7 @@ namespace FlyAI
             }
 
             var frame = input.Read();
-            if (!captured && !(input is ImuSwatter && !finished)) // The sensor does not need the mouse captured.
+            if (!captured && !(input is ImuSwatter && ImuReceiver.IsLive && !finished)) // The sensor does not need the mouse captured.
             {
                 frame.aimDelta = Vector2.zero;
                 frame.swing = false;

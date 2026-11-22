@@ -3,7 +3,9 @@
 Record labelled swings from the real swatter, train a small classifier, export it as TensorFlow Lite
 for the Raspberry Pi, and run it in the game backend in place of the threshold rules.
 
-Classes: `idle`, `aiming`, `swing`, `flick`, `bump`, plus a **strength** estimate from 0 to 10.
+The model makes one decision, **swing** or **idle**, plus a **strength** estimate from 0 to 10. Takes are recorded as
+`idle`, `aiming`, `swing`, `flick` or `bump`; at training time swing and flick become **swing**, and idle, aiming and
+bump become **idle**. The files keep their recorded labels (`--five-classes` trains on them separately).
 
 ```
 ESP32 --ws:8767--> python -m swatter_ml.record (laptop)   record takes  ->  data/takes/

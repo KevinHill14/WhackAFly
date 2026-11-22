@@ -72,6 +72,7 @@ local.properties
 
 # Local firmware config (WiFi credentials)
 firmware/include/config.h
+firmware/src/wifi_secrets.h
 
 # --- FlyAI (LiDAR and Unity) ---
 # Python

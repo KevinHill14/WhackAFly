@@ -416,6 +416,24 @@ Code: `ImuSwatter.cs` (`ImuReceiver`, `ImuSwatter : ISwatterInput`, `ImuTest`).
 - **Difficulty slider** (main menu, under Theme; saved as `FlyAI.Difficulty`): Easy, Medium, Hard (`Difficulty.cs`). Each fly rolls five traits (skittish, restless, night sight, pace, hearing). Easy takes only the low side of each (slower, calmer, hard of hearing), Hard only the high side (faster, jumpier, sharp ears), Medium picks either side per trait at random, so it is a combination. The result screen shows the level.
 - **Pi backend** (`backend/`, the `backend-split` branch): `BackendClient` connects to `FLYAI_BACKEND` (default `ws://192.168.4.1:8766`, the Pi hotspot; use `ws://127.0.0.1:8766` for a local backend; `off` disables it). If it is connected when a room loads, the backend runs the fly (`FlyView` draws it, `BeginRemoteRound`), Unity keeps the room, the round UI and the senses. Sounds go to it as `stimulus` messages, the hunt start sends `reset` with `start:true` (no second countdown), and a `squish` event wins the round. Difficulty is sent as `difficulty` (0-2) and scales its fly speed and how threatening the swatter looks. If the backend is not reachable the game runs the local `FlyAgent` and brain as before.
 
+## Wi-Fi: swatter, Raspberry Pi and Unity
+
+Everything joins the **Samsung Smart Fridge** hotspot. The Pi is at `172.20.10.10`.
+
+```
+ESP32 swatter --ws:8767--> Pi: swing model (TFLite), aim and stick stream, the fly (backend/fly.py), brain --ws:8766--> Unity
+```
+
+- **The Pi runs the fly:** personality, perching, walking, flight, what it perceives and what the brain makes it do (`backend/fly.py`). `FlyAgent` draws it and reports what only Unity knows: the light at the fly, the flashlight, room events and which flight paths are clear of walls. Unity decides what the swatter physically hits and tells the Pi with `swat`.
+- **Start the Pi:** `ssh qnxuser@172.20.10.10`, then `cd WhackAFly && sh backend/start.sh` (`stop` and `status` also work). The model is `swatter_ml/models/latest` on the Pi, which git does not carry: copy it after retraining.
+- **Fallbacks:** if the swatter is off, the mouse and keyboard work. If the Pi is unreachable when a level loads, the same fly runs on this laptop with a local brain. If the link drops mid-round, Unity reconnects and the round carries on.
+- **Firmware:** copy `firmware/src/wifi_secrets.example.h` to `wifi_secrets.h` (git-ignored) and put the hotspot password in it before building.
+- **USB:** `FLYAI_IMU=usb` still runs the old cable bridge. Otherwise Unity leaves the serial port free for `swatter_ml/record.py`. **F2** shows the sensor panel.
+
+## Thumbstick
+
+The thumbstick on the swatter is the main way to move: up/down walks, left/right turns, and how far you push sets the speed. WASD still works as the backup. In the **main menu** the stick steps up and down through the items, starting on PLAY, with a yellow outline on the current one. Pressing the stick selects it (on Difficulty, each press steps Easy, Medium, Hard). The mouse still works. The press does nothing outside the menu, and a Windows file dialog still needs the mouse. It arrives over Wi-Fi through the Pi. If the swatter stops sending, the stick reads as centred and the mouse and keyboard take over. **F3** flips up/down and **F4** flips left/right if a direction is backwards; both are remembered. Leave the stick untouched while the board starts, because that is when its centre is measured.
+
 ## Best runs (main menu)
 
 Every win is saved on this computer (`FlyAI-scores.json` in the Unity persistent data folder, best 200 kept): time, difficulty, damage to the apartment, swings. The menu shows the top 10 on the right. **Filter** (top right) cycles the sort key Time, Difficulty, Damage; **Reverse** flips the order (Difficulty goes easy to hard, or hard to easy; time and damage go low to high, or high to low). Ties are broken in the order time, difficulty, damage, swings. This is separate from `Leaderboard.cs` (Eesha's online board and event log), which is now off unless `FLYAI_LEADERBOARD` is set.

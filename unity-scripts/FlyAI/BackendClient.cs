@@ -18,6 +18,15 @@ namespace FlyAI
         public string state;
         public float[] pos;
         public float[] heading;
+        public float[] up;
+        public float[] vel;
+        public bool grooming;
+        public bool hurrying;
+        public string personality;
+        public float looming;
+        public string eye;
+        public string source;
+        public string action;
         public float distance;
         public int score;
         public int swings;
@@ -31,31 +40,50 @@ namespace FlyAI
         public float rate;
         public string phase;
         public float time_left;
+        public string swatter;      // Swatter link: never, ok or lost.
+        public string classifier;   // What detects swings on the Pi.
+        public int[] spikes;        // Brain output, for the panel and neural view.
+        public int[] active;
+        public int[] neuron_groups;
+        public string[] group_names;
+        public string mode;
+        public int neurons;
+        public float[] efficacy;
+        public float[] dg;          // Controller: rotation since the last message, radians.
+        public float[] g;           // Controller: gyro, rad/s.
+        public float[] s;           // Controller: thumbstick x, y.
+        public int b;               // Controller: thumbstick pressed.
     }
 
-    // Connects to the game backend on the Pi, sends the room, pose and swings,
-    // and hands fly state and swatter events back on the main thread.
-    // Set FLYAI_BACKEND (for example ws://192.168.4.1:8766) to override the address.
+    // The game's link to the Raspberry Pi over Wi-Fi. The Pi runs the fly, the swing model and the brain. This sends the
+    // room, the player's pose, swings and what the room looks like to the fly, and hands back the fly's state and the
+    // swatter's aim, thumbstick and swings. It reconnects by itself.
+    // Set FLYAI_BACKEND to override the address (for example ws://127.0.0.1:8766), or to "off".
     public class BackendClient : MonoBehaviour
     {
-        const string DefaultUrl = "ws://192.168.4.1:8766"; // the Pi hotspot; set FLYAI_BACKEND=ws://127.0.0.1:8766 to test with a local backend
+        const string DefaultUrl = "ws://172.20.10.10:8766"; // The Pi, on the Samsung Smart Fridge hotspot.
         const float PoseInterval = 0.05f;
 
         public static BackendClient Current { get; private set; }
+        public static bool Enabled => (Environment.GetEnvironmentVariable("FLYAI_BACKEND") ?? "").ToLowerInvariant() != "off";
         public static bool Connected => Current != null && Current.connected;
         // True while the Pi runs the fly for the current room (decided when the room loads).
-        public static bool Driving { get; private set; }
+        public static bool Driving { get; set; }
         public static BackendMessage LastFly { get; private set; }
         public static int Score { get; private set; }
+        public static int[] NeuronGroups { get; private set; }
+        public static string[] GroupNames { get; private set; }
+        public static string BrainInfo { get; private set; } = "";
+        public static float[] Efficacy { get; private set; } = { 1f, 1f, 1f, 1f };
 
         readonly ConcurrentQueue<BackendMessage> incoming = new ConcurrentQueue<BackendMessage>();
         readonly ConcurrentQueue<string> outgoing = new ConcurrentQueue<string>();
         readonly ConcurrentQueue<BackendMessage> swatterEvents = new ConcurrentQueue<BackendMessage>();
         CancellationTokenSource cancel;
         volatile bool connected;
+        volatile bool roundPlaying;
+        volatile string pendingRoom;
         float lastPose;
-        string pendingRoom;
-        FlyView view;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         static void ResetStatics()
@@ -64,13 +92,17 @@ namespace FlyAI
             LastFly = null;
             Score = 0;
             Driving = false;
+            NeuronGroups = null;
+            GroupNames = null;
+            BrainInfo = "";
+            Efficacy = new[] { 1f, 1f, 1f, 1f };
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void Bootstrap()
         {
             if (Current != null) return;
-            if ((Environment.GetEnvironmentVariable("FLYAI_BACKEND") ?? "").ToLowerInvariant() == "off") return;
+            if (!Enabled) return;
             new GameObject("FlyAI Backend").AddComponent<BackendClient>();
         }
 
@@ -95,86 +127,65 @@ namespace FlyAI
         static string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
         static string V(Vector3 v) => $"[{F(v.x)},{F(v.y)},{F(v.z)}]";
 
-        public static void SendRoom(RoomData room, Vector3 head)
+        static void Send(string json)
         {
-            if (Current == null || room.landingSpots == null) return;
-            var sb = new StringBuilder("{\"type\":\"room\",\"head\":").Append(V(head)).Append(",\"landingSpots\":[");
-            var first = true;
-            foreach (var spot in room.landingSpots)
+            if (Connected) Current.outgoing.Enqueue(json);
+        }
+
+        // The fly's landing spots, plus the points in the air and which of them have a clear line between them, because
+        // the Pi has no copy of the room's walls. Sent now if connected, and again after every reconnect.
+        public static void SendRoom(IList<(Vector3 position, Vector3 normal)> spots, Vector3 head, float ceiling,
+                                    IList<Vector3> air, IList<string> links, IList<int> spotAir)
+        {
+            if (Current == null) return;
+            LastFly = null;
+            var sb = new StringBuilder("{\"type\":\"room\",\"hold\":true,\"head\":").Append(V(head))
+                .Append(",\"ceiling\":").Append(F(ceiling)).Append(",\"landingSpots\":[");
+            for (var i = 0; i < spots.Count; i++)
             {
-                if (spot.position == null || spot.position.Length != 3) continue;
-                if (!first) sb.Append(',');
-                first = false;
-                var normal = spot.normal != null && spot.normal.Length == 3 ? new Vector3(-spot.normal[0], spot.normal[1], spot.normal[2]) : Vector3.up;
-                sb.Append("{\"position\":").Append(V(RoomLoader.ToUnity(spot.position)))
-                  .Append(",\"normal\":").Append(V(normal)).Append('}');
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"position\":").Append(V(spots[i].position)).Append(",\"normal\":").Append(V(spots[i].normal)).Append('}');
             }
+            sb.Append("],\"air\":[");
+            for (var i = 0; i < air.Count; i++) sb.Append(i > 0 ? "," : "").Append(V(air[i]));
+            sb.Append("],\"links\":[");
+            for (var i = 0; i < links.Count; i++) sb.Append(i > 0 ? ",\"" : "\"").Append(links[i]).Append('"');
+            sb.Append("],\"spotAir\":[");
+            for (var i = 0; i < spotAir.Count; i++) sb.Append(i > 0 ? "," : "").Append(spotAir[i]);
             sb.Append("]}");
-            Current.pendingRoom = sb.ToString();   // sent now if connected, and again after every reconnect
-            if (Current.connected) Current.outgoing.Enqueue(Current.pendingRoom);
+            Current.pendingRoom = sb.ToString();
+            Send(Current.pendingRoom);
         }
 
         public static void SendPose(Vector3 head, Vector3 aim, float reach)
         {
-            if (Current == null || !Current.connected || Time.unscaledTime - Current.lastPose < PoseInterval) return;
+            if (!Driving || !Connected || Time.unscaledTime - Current.lastPose < PoseInterval) return;
             Current.lastPose = Time.unscaledTime;
-            Current.outgoing.Enqueue($"{{\"type\":\"pose\",\"head\":{V(head)},\"aim\":{V(aim)},\"reach\":{F(reach)}}}");
+            Send($"{{\"type\":\"pose\",\"head\":{V(head)},\"aim\":{V(aim)},\"reach\":{F(reach)}}}");
         }
 
-        // swept: for a directional swing, the directions the swatter passed through before `direction`, where it
-        // landed. The backend hits the fly if it is near any of them. Older backends ignore the field.
+        // The swing as a threat the fly can see. Unity decides what the swatter actually hits (see SendSwat).
         public static void SendSwing(Vector3 origin, Vector3 direction, float strength, float reach, List<Vector3> swept = null)
         {
-            if (Current == null || !Current.connected) return;   // old swings must not replay later
-            var dirs = "";
-            if (swept != null && swept.Count > 0)
-            {
-                var parts = new string[Mathf.Min(swept.Count, 32)];
-                for (var i = 0; i < parts.Length; i++) parts[i] = V(swept[i]);
-                dirs = ",\"dirs\":[" + string.Join(",", parts) + "]";
-            }
-            Current.outgoing.Enqueue($"{{\"type\":\"swing\",\"origin\":{V(origin)},\"dir\":{V(direction)},\"strength\":{F(strength)},\"reach\":{F(reach)}{dirs}}}");
+            if (!Driving || !Connected) return;   // old swings must not replay later
+            Send($"{{\"type\":\"swing\",\"threat\":true,\"origin\":{V(origin)},\"dir\":{V(direction)},\"strength\":{F(strength)},\"reach\":{F(reach)}}}");
         }
 
-        // The room has loaded. If the backend is reachable it runs the fly; Unity only draws it and runs the round UI.
-        // Returns false when there is no backend, and the caller spawns the local fly instead.
-        public static bool BeginRemoteRound(Transform parent)
-        {
-            Driving = false;
-            if (!Connected) return false;
-            if (Current.view != null) Destroy(Current.view.gameObject);
-            LastFly = null;
-            Score = 0;
-            Current.view = FlyView.Create(parent);
-            GameRound.Begin(parent, null);
-            Driving = true;
-            Current.outgoing.Enqueue($"{{\"type\":\"difficulty\",\"level\":{Difficulty.Level}}}");
-            Debug.Log("[FlyAI] The backend is running the fly for this room.");
-            return true;
-        }
+        public static void SendSwat() => Send("{\"type\":\"swat\"}");
 
-        // The 3-2-1 is over: the hunt starts on the backend too, with a fresh brain.
-        public static void StartRemoteHunt()
-        {
-            if (!Driving || !Connected) return;
-            Current.outgoing.Enqueue($"{{\"type\":\"difficulty\",\"level\":{Difficulty.Level}}}");
-            Current.outgoing.Enqueue("{\"type\":\"reset\",\"start\":true}");
-        }
+        // The 3-2-1 is over: the hunt starts on the Pi, with this difficulty and a fresh brain.
+        public static void StartHunt() => Send($"{{\"type\":\"hunt\",\"level\":{Difficulty.Level}}}");
 
-        // A sound near the fly (glass, a swing landing). Unity works out how loud it is at the fly; the brain's ears get it.
-        public static void SendSound(Vector3 point, float loudness, float range)
-        {
-            if (!Driving || !Connected || LastFly == null || LastFly.pos == null || LastFly.pos.Length != 3) return;
-            var fly = new Vector3(LastFly.pos[0], LastFly.pos[1], LastFly.pos[2]);
-            var value = Mathf.Clamp01(loudness * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, fly)));
-            if (value <= 0.05f) return;
-            var heading = LastFly.heading != null && LastFly.heading.Length == 3 ? new Vector3(LastFly.heading[0], 0f, LastFly.heading[2]) : Vector3.forward;
-            var to = point - fly;
-            to.y = 0f;
-            var across = to.sqrMagnitude < 1e-6f || heading.sqrMagnitude < 1e-6f ? 0f : Vector3.Dot(Vector3.Cross(Vector3.up, heading.normalized), to.normalized);
-            var side = Mathf.Abs(across) < 0.2f ? "center" : across > 0f ? "right" : "left";
-            Current.outgoing.Enqueue($"{{\"type\":\"stimulus\",\"kind\":\"sound\",\"value\":{F(value)},\"side\":\"{side}\"}}");
-        }
+        // A sound at the fly, already scaled by distance. The fly's own hearing is applied on the Pi.
+        public static void SendSound(float value, string ear) =>
+            Send($"{{\"type\":\"stimulus\",\"kind\":\"sound\",\"value\":{F(value)},\"side\":\"{ear}\"}}");
+
+        // What only the game can know: the light at the fly, the flashlight, and room events.
+        public static void SendSenses(float vision, float beam, float surge, float lightning, float headlights, float power,
+                                      bool sneak, Vector3 swatter, Vector3 flashlight) =>
+            Send($"{{\"type\":\"senses\",\"vision\":{F(vision)},\"beam\":{F(beam)},\"surge\":{F(surge)},\"lightning\":{F(lightning)}," +
+                 $"\"headlights\":{F(headlights)},\"power\":{F(power)},\"sneak\":{(sneak ? "true" : "false")}," +
+                 $"\"swatter\":{V(swatter)},\"flashlight\":{V(flashlight)}}}");
 
         public static bool TakeSwatterEvent(out BackendMessage message)
         {
@@ -191,18 +202,23 @@ namespace FlyAI
                 {
                     try
                     {
-                        await socket.ConnectAsync(new Uri(url), token);
+                        using (var attempt = CancellationTokenSource.CreateLinkedTokenSource(token))
+                        {
+                            attempt.CancelAfter(3000);   // An unreachable Pi must not hold this up for long.
+                            await socket.ConnectAsync(new Uri(url), attempt.Token);
+                        }
                         while (outgoing.TryDequeue(out _)) { }   // drop anything queued before the connection
-                        if (pendingRoom != null) outgoing.Enqueue(pendingRoom);
+                        var room = pendingRoom;
+                        if (room != null)
+                            outgoing.Enqueue(room.Replace("{\"type\":\"room\",", $"{{\"type\":\"room\",\"resume\":true,\"playing\":{(roundPlaying ? "true" : "false")},"));
                         connected = true;
-                        outgoing.Enqueue($"{{\"type\":\"difficulty\",\"level\":{Difficulty.Level}}}");
-                        await Task.WhenAny(Receive(socket, token), Send(socket, token));
+                        await Task.WhenAny(Receive(socket, token), SendLoop(socket, token));
                     }
                     catch (Exception) when (!token.IsCancellationRequested) { }
                     catch (OperationCanceledException) { return; }
                     finally { connected = false; }
                 }
-                try { await Task.Delay(2000, token); } catch (OperationCanceledException) { return; }
+                try { await Task.Delay(1000, token); } catch (OperationCanceledException) { return; }
             }
         }
 
@@ -222,22 +238,23 @@ namespace FlyAI
             }
         }
 
-        async Task Send(ClientWebSocket socket, CancellationToken token)
+        async Task SendLoop(ClientWebSocket socket, CancellationToken token)
         {
             while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
             {
                 if (outgoing.TryDequeue(out var json))
                     await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)), WebSocketMessageType.Text, true, token);
                 else
-                    await Task.Delay(5, token);
+                    await Task.Delay(2, token);
             }
         }
 
         // ---- main thread ---------------------------------------------------
         void Update()
         {
+            roundPlaying = GameRound.Current != null && GameRound.Current.FlyActive;
             var handled = 0;
-            while (handled++ < 64 && incoming.TryDequeue(out var m))
+            while (handled++ < 256 && incoming.TryDequeue(out var m))
             {
                 if (m == null) continue;
                 switch (m.type)
@@ -245,18 +262,23 @@ namespace FlyAI
                     case "fly":
                         LastFly = m;
                         Score = m.score;
-                        if (!Driving) break;   // a local fly is playing this room
-                        if (view == null) view = FlyView.Create(null);
-                        view.Apply(m);
-                        if (RoomTension.Current != null) RoomTension.Current.SetFlyDistance(m.distance);
                         break;
-                    case "event":
-                        if (view != null) view.OnEvent(m);
-                        if (Driving && m.kind == "squish" && GameRound.Current != null)
-                            GameRound.Current.Win(m.pos != null && m.pos.Length == 3 ? new Vector3(m.pos[0], m.pos[1], m.pos[2]) : Vector3.zero);
+                    case "controller":
+                        ImuReceiver.Current?.FeedNetwork(m.dg, m.g, m.s, m.b);
                         break;
                     case "swatter":
                         swatterEvents.Enqueue(m);
+                        break;
+                    case "brain":
+                        FlyAgent.Current?.FeedBrain(m);
+                        break;
+                    case "brain_groups":
+                        NeuronGroups = m.neuron_groups;
+                        GroupNames = m.group_names;
+                        break;
+                    case "brain_status":
+                        BrainInfo = $"{m.source}, {m.neurons} neurons";
+                        if (m.efficacy != null && m.efficacy.Length == 4) Efficacy = m.efficacy;
                         break;
                 }
             }
@@ -264,9 +286,21 @@ namespace FlyAI
             while (swatterEvents.Count > 16) swatterEvents.TryDequeue(out _);
         }
 
+        // One line saying how each piece is connected.
+        public static string StatusLine()
+        {
+            string Dot(bool ok) => ok ? "<color=#6FE08A>●</color>" : "<color=#FF7C6B>●</color>";
+            if (!Connected) return $"{Dot(false)} Raspberry Pi offline: {(Driving ? "reconnecting" : "playing on this laptop, retrying")}";
+            var fly = LastFly;
+            var swatter = fly != null && fly.swatter == "ok";
+            var model = fly != null && fly.classifier != null && fly.classifier.StartsWith("model");
+            return $"{Dot(true)} Pi    {Dot(swatter)} Swatter    {Dot(model)} Model    {Dot(BrainInfo.Length > 0)} Brain";
+        }
+
         void OnGUI()
         {
-            if (connected && Driving && !MainMenu.Active) GUI.Label(new Rect(16, 36, 400, 24), "Pi backend is running the fly");
+            if (MainMenu.Active) return;
+            GUI.Label(new Rect(16, 36, 520, 24), StatusLine(), new GUIStyle(GUI.skin.label) { richText = true });
         }
     }
 }

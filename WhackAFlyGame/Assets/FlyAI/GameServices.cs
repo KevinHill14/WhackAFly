@@ -92,13 +92,13 @@ namespace FlyAI
         // --- Motion sensor ----------------------------------------------------------------------------------
 
         // Starts firmware/imu_bridge.py, which reads the sensor board over USB and sends it to the game (see
-        // ImuSwatter). If there is no board, no script or no pyserial it just exits, and the game plays with the mouse.
-        // FLYAI_IMU=off skips it.
+        // ImuSwatter). The swatter normally reaches the game over Wi-Fi through the Pi, so this only runs with FLYAI_IMU=usb;
+        // leaving it off also keeps the serial port free for swatter_ml/record.py.
         public static void StartImu()
         {
             if (imuBridge != null && !imuBridge.HasExited) return;
             var setting = Environment.GetEnvironmentVariable("FLYAI_IMU");
-            if (setting != null && setting.Trim().Equals("off", StringComparison.OrdinalIgnoreCase)) return;
+            if (setting == null || !setting.Trim().Equals("usb", StringComparison.OrdinalIgnoreCase)) return;
             var script = Path.Combine(Root, "firmware", "imu_bridge.py");
             if (!File.Exists(script)) return;
             imuBridge = Launch(Python, Quote(script), false);

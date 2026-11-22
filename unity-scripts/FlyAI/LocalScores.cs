@@ -136,8 +136,8 @@ namespace FlyAI
             var sortWidth = unit * 8.5f;
             var reverseRect = new Rect(right - reverseWidth, 12f, reverseWidth, buttonHeight);
             var sortRect = new Rect(reverseRect.x - 8f - sortWidth, 12f, sortWidth, buttonHeight);
-            if (GUI.Button(sortRect, "Filter: " + keyName, button)) NextKey();
-            if (GUI.Button(reverseRect, Reversed ? "Reverse ▲" : "Reverse ▼", button)) Reversed = !Reversed;
+            if (GUI.Button(sortRect, "Filter: " + keyName, button) | MenuCursor.Hit(sortRect)) NextKey();
+            if (GUI.Button(reverseRect, Reversed ? "Reverse ▲" : "Reverse ▼", button) | MenuCursor.Hit(reverseRect)) Reversed = !Reversed;
 
             var rowHeight = unit * 1.3f;
             var list = Sorted(Key, Reversed);

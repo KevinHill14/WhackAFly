@@ -4,7 +4,11 @@ using UnityEngine.InputSystem;
 
 namespace FlyAI
 {
-    // The fly. The fruit fly brain (brain/server.py) decides what it does; the game only supplies what the fly
+    // The fly. On the Raspberry Pi (backend/fly.py) all of its behaviour runs remotely, and this class draws it and reports
+    // what only the game knows (light, flashlight, room events, clear flight paths). If the Pi is not reachable, the same
+    // behaviour runs here against a local brain.
+    //
+    // The fruit fly brain (brain/server.py) decides what it does; the game only supplies what the fly
     // "sees" and forces where it may land.
     //
     //   Input   Looming (0-1) and which eye sees it, from: the swatter, the player walking at it, the
@@ -141,6 +145,18 @@ namespace FlyAI
         float hearing = 1f;     // Scales how loud sounds are to it.
         GUIStyle statusStyle;
 
+        // Remote mode: the Pi runs the fly and this follows it.
+        bool remote;
+        public bool IsRemote => remote;
+        BackendMessage appliedFly;
+        bool netPlaced;
+        Vector3 netPosition;
+        Vector3 netUp = Vector3.up;
+        Vector3 netForward = Vector3.forward;
+        Vector3 netVelocity;
+        float netAt;
+        float nextSenses;
+
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         static void ResetStatics()
         {
@@ -177,6 +193,7 @@ namespace FlyAI
             go.transform.SetParent(parent, false);
             var agent = go.AddComponent<FlyAgent>();
             agent.Init(found, parent.GetComponent<RoomAssets>(), room.ceilingHeight);
+            agent.SendRoomToPi(RoomLoader.ToUnity(room.playerStart.position) + Vector3.up * 1.6f);
             return agent;
         }
 
@@ -201,6 +218,11 @@ namespace FlyAI
         // Called when the round's countdown ends.
         public void OnRoundStart()
         {
+            if (remote)
+            {
+                BackendClient.StartHunt();
+                return;
+            }
             RollPersonality(); // The level loads behind the menu, so this picks up a difficulty changed after that.
             nextAmbient = Time.time + Random.Range(4f, 8f) / restless;
             cooldownUntil = Time.time + 0.5f;
@@ -209,6 +231,8 @@ namespace FlyAI
 
         void Init(List<Spot> landing, RoomAssets assets, float ceiling)
         {
+            remote = BackendClient.Connected;
+            BackendClient.Driving = remote;
             RollPersonality();
             ceilingHeight = ceiling > 1f ? ceiling : 2.5f;
             spots.AddRange(landing);
@@ -241,7 +265,7 @@ namespace FlyAI
             glow.shadows = LightShadows.None;
             glowTexture = MakeGlow();
 
-            if (client == null)
+            if (client == null && !remote)
             {
                 var url = FlyBrainClient.ResolveUrl();
                 if (url != null)
@@ -253,6 +277,47 @@ namespace FlyAI
             }
             Current = this;
             GameRound.Begin(transform.parent, this);
+        }
+
+        // The Pi has no copy of the room's walls, so it gets points in the air and which pairs have a clear line of flight.
+        void SendRoomToPi(Vector3 head)
+        {
+            const int MaxAirPoints = 40;
+            Physics.SyncTransforms();
+            var air = new List<Vector3>();
+            var step = Mathf.Max(1, spots.Count / MaxAirPoints);
+            for (var i = 0; i < spots.Count && air.Count < MaxAirPoints; i += step)
+                air.Add(ClampToAir(spots[i].position + Vector3.up * 0.9f));
+
+            var links = new List<string>();
+            var row = new char[air.Count];
+            for (var a = 0; a < air.Count; a++)
+            {
+                for (var b = 0; b < air.Count; b++) row[b] = a != b && !Physics.Linecast(air[a], air[b]) ? '1' : '0';
+                links.Add(new string(row));
+            }
+
+            // For each spot, the nearest air point it can fly straight up to.
+            var spotAir = new List<int>(spots.Count);
+            var order = new List<int>(air.Count);
+            for (var a = 0; a < air.Count; a++) order.Add(a);
+            foreach (var spot in spots)
+            {
+                var from = spot.position + spot.normal * 0.15f;
+                order.Sort((a, b) => (air[a] - from).sqrMagnitude.CompareTo((air[b] - from).sqrMagnitude));
+                var chosen = order[0];
+                for (var k = 0; k < Mathf.Min(6, order.Count); k++)
+                    if (!Physics.Linecast(from, air[order[k]]))
+                    {
+                        chosen = order[k];
+                        break;
+                    }
+                spotAir.Add(chosen);
+            }
+
+            var pairs = new List<(Vector3 position, Vector3 normal)>(spots.Count);
+            foreach (var spot in spots) pairs.Add((spot.position, spot.normal));
+            BackendClient.SendRoom(pairs, head, ceilingHeight, air, links, spotAir);
         }
 
         // Landing spots on the same surface (same plane, close together) are joined so the fly can walk between them.
@@ -284,7 +349,7 @@ namespace FlyAI
         // Called by the player when a swing starts.
         public void OnSwing(Vector3 origin, Vector3 direction, float radius, float reach, float strength)
         {
-            if (state == State.Dead) return;
+            if (state == State.Dead || remote) return; // The Pi gets the swing itself.
             // A swing aimed at the fly is a big looming shape; one aimed elsewhere barely registers.
             var toFly = transform.position - origin;
             swingThreat = toFly.magnitude < reach + 0.6f
@@ -303,6 +368,16 @@ namespace FlyAI
 
             var dt = Time.deltaTime;
             var round = GameRound.Current;
+            if (remote)
+            {
+                UpdateRemote(dt, round);
+                if (state == State.Dead) return;
+                Animate();
+                UpdateLocator(dt);
+                if (RoomTension.Current != null)
+                    RoomTension.Current.SetFlyDistance(Vector3.Distance(transform.position, player.Head.position));
+                return;
+            }
             if (round == null || round.FlyActive)
             {
                 UpdateStimulus(dt);
@@ -327,6 +402,100 @@ namespace FlyAI
 
             if (RoomTension.Current != null)
                 RoomTension.Current.SetFlyDistance(Vector3.Distance(transform.position, player.Head.position));
+        }
+
+        // --- Following the fly on the Pi -----------------------------------------------------------------
+
+        void UpdateRemote(float dt, GameRound round)
+        {
+            if (round == null || round.FlyActive) SendSenses();
+            var m = BackendClient.LastFly;
+            if (m != null && !ReferenceEquals(m, appliedFly))
+            {
+                appliedFly = m;
+                ApplyFly(m, round);
+                if (state == State.Dead) return;
+            }
+            if (!netPlaced) return;
+
+            // Follow smoothly between the Pi's 30 updates a second, leading a little while it flies.
+            var flying = state == State.Flying;
+            var target = flying ? netPosition + netVelocity * Mathf.Min(Time.unscaledTime - netAt, 0.08f) : netPosition;
+            transform.position = Vector3.Lerp(transform.position, target, 1f - Mathf.Exp(-(flying ? 28f : 20f) * dt));
+            if (netForward.sqrMagnitude > 1e-4f)
+                transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(netForward, netUp), 1f - Mathf.Exp(-18f * dt));
+            perchNormal = netUp;
+
+            if (flying)
+            {
+                buzz.pitch = escaping ? 1.3f : 1f;
+                buzz.volume = Mathf.MoveTowards(buzz.volume, 1f, dt * 10f);
+            }
+            else ChirpQuietly(dt);
+        }
+
+        void ApplyFly(BackendMessage m, GameRound round)
+        {
+            if (m.pos == null || m.pos.Length != 3) return;
+            netPosition = new Vector3(m.pos[0], m.pos[1], m.pos[2]);
+            if (m.heading != null && m.heading.Length == 3) netForward = new Vector3(m.heading[0], m.heading[1], m.heading[2]);
+            if (m.up != null && m.up.Length == 3) netUp = new Vector3(m.up[0], m.up[1], m.up[2]);
+            netVelocity = m.vel != null && m.vel.Length == 3 ? new Vector3(m.vel[0], m.vel[1], m.vel[2]) : Vector3.zero;
+            netAt = Time.unscaledTime;
+            if (!netPlaced)
+            {
+                netPlaced = true;
+                transform.position = netPosition;
+                if (netForward.sqrMagnitude > 1e-4f) transform.rotation = Quaternion.LookRotation(netForward, netUp);
+            }
+
+            if (m.state == "dead")
+            {
+                if (m.phase == "won" && round != null && round.FlyActive) Die();
+                return;
+            }
+            var next = m.state == "walking" ? State.Walking : m.state == "flying" || m.state == "fleeing" ? State.Flying : State.Perched;
+            if (state == State.Flying && next != State.Flying)
+            {
+                landedAt = Time.time;
+                nextChirp = Time.time + 1.2f;
+            }
+            state = next;
+            escaping = m.state == "fleeing";
+            groomUntil = m.grooming ? Time.time + 0.1f : 0f;
+            fleeUntil = m.hurrying ? Time.time + 0.1f : 0f;
+            if (!string.IsNullOrEmpty(m.personality)) PersonalityName = m.personality;
+            looming = m.looming;
+            if (!string.IsNullOrEmpty(m.eye)) eye = m.eye;
+            if (!string.IsNullOrEmpty(m.source)) source = m.source;
+            if (!string.IsNullOrEmpty(m.action)) lastAction = m.action;
+        }
+
+        // What only the game can know, 20 times a second.
+        void SendSenses()
+        {
+            if (Time.unscaledTime < nextSenses) return;
+            nextSenses = Time.unscaledTime + 0.05f;
+            var position = transform.position;
+            var swatterPosition = player.SwatterTransform.position;
+            var beam = FlashlightAt(position);
+            flashlightOnFly = beam;
+            lightLevel = RoomLightAt(position) + beam;
+            vision = Mathf.Clamp01(Mathf.Max(lightLevel * 0.8f, RoomLightAt(swatterPosition)) / FullVisionLight);
+            var events = RoomEvents.Current;
+            BackendClient.SendSenses(vision, beam, events != null ? events.Surge : 0f, events != null ? events.LightningLevel : 0f,
+                events != null ? events.HeadlightLevel : 0f, events != null ? events.Power : 1f, player.Sneaking, swatterPosition,
+                player.Flashlight != null ? player.Flashlight.transform.position : player.Head.position);
+        }
+
+        // A decision from the brain on the Pi, for the panel and the neural view.
+        public void FeedBrain(BackendMessage m)
+        {
+            lastStrength = m.strength;
+            lastDecisionSide = m.side;
+            lastDecisionAt = Time.time;
+            if (m.spikes != null && m.spikes.Length > 0) lastSpikes = m.spikes;
+            NeuralView.Current?.Feed(m.active != null && m.active.Length > 0 ? m.active : null, m.spikes);
         }
 
         // --- What the fly sees --------------------------------------------------------------------------
@@ -444,22 +613,26 @@ namespace FlyAI
 
         // A loud sound near the fly (glass breaking, a swing landing). The brain only has eyes, so the game turns
         // the sound into a looming pulse from the direction it came from; the brain still decides what the fly does.
-        // Sounds go to whichever fly is playing: the local one, or the one the Pi backend runs.
         public static void Noise(Vector3 point, float loudness, float range = 8f)
         {
             if (Current != null) Current.HearNoise(point, loudness, range);
-            else BackendClient.SendSound(point, loudness, range);
         }
 
         public void HearNoise(Vector3 point, float loudness, float range = 8f)
         {
             if (state == State.Dead) return;
-            var value = Mathf.Clamp01(loudness * hearing * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, transform.position)));
-            if (value < 0.05f) return;
+            // On the Pi the fly's own hearing is applied there.
+            var value = Mathf.Clamp01(loudness * (remote ? 1f : hearing) * Mathf.InverseLerp(range, 0.4f, Vector3.Distance(point, transform.position)));
+            if (value < (remote ? 0.02f : 0.05f)) return;
             // The ears get it, not the eyes: the side is which ear the sound is nearer to.
             var local = transform.InverseTransformDirection(point - transform.position);
             var across = local.x / Mathf.Max(0.001f, (point - transform.position).magnitude);
             soundEar = Mathf.Abs(across) < 0.2f ? "center" : across > 0f ? "right" : "left";
+            if (remote)
+            {
+                BackendClient.SendSound(value, soundEar);
+                return;
+            }
             if (value > soundValue || Time.time >= soundUntil) soundValue = value;
             soundUntil = Time.time + 0.35f;
         }
@@ -547,6 +720,7 @@ namespace FlyAI
             if (state == State.Dead) return false;
             var closest = ClosestOnSegment(origin, origin + direction * length, transform.position);
             if (Vector3.Distance(closest, transform.position) > radius + KillPadding) return false;
+            if (remote) BackendClient.SendSwat();
             Die();
             return true;
         }
@@ -1014,7 +1188,7 @@ namespace FlyAI
         // How used to each kind of input the fly has got (100% = fresh, lower = it reacts less).
         string HabituationLine()
         {
-            var e = client?.Efficacy;
+            var e = remote ? BackendClient.Efficacy : client?.Efficacy;
             if (e == null) return "";
             string P(float v) => v < 0.97f ? $"<color=#FFC857>{Mathf.RoundToInt(v * 100f)}%</color>" : "100%";
             return $"<b>Used to it</b>  eyes L {P(e[0])} R {P(e[1])}   ears L {P(e[2])} R {P(e[3])}";
@@ -1033,10 +1207,11 @@ namespace FlyAI
                 statusStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, richText = true, wordWrap = false, normal = { textColor = new Color(0.86f, 0.9f, 0.86f) } };
                 statusStyle.hover.textColor = statusStyle.active.textColor = statusStyle.focused.textColor = statusStyle.normal.textColor;
 
-            var online = client != null && client.Connected;
-            var info = string.IsNullOrEmpty(client?.BrainInfo) ? "connected" : client.BrainInfo;
+            var online = remote ? BackendClient.Connected : client != null && client.Connected;
+            var brainText = remote ? BackendClient.BrainInfo : client?.BrainInfo;
+            var info = string.IsNullOrEmpty(brainText) ? "connected" : brainText;
             var header = online ? $"<color=#7CFF9B>FLY BRAIN  {info}</color>"
-                       : client == null ? "<color=#FF7C7C>FLY BRAIN  switched off - fly not reacting</color>"
+                       : client == null && !remote ? "<color=#FF7C7C>FLY BRAIN  switched off - fly not reacting</color>"
                        : "<color=#FF7C7C>FLY BRAIN  OFFLINE - fly not reacting</color>";
             var fresh = Time.time - lastDecisionAt < 0.5f;
             var strength = fresh ? lastStrength : 0f;
@@ -1045,7 +1220,7 @@ namespace FlyAI
             var lines = new[]
             {
                 header,
-                online ? client.url : "start brain/server.py, or set FLYAI_BRAIN",
+                remote ? (online ? "running on the Raspberry Pi" : "Raspberry Pi link lost, reconnecting") : online ? client.url : "start brain/server.py, or set FLYAI_BRAIN",
                 "",
                 $"<b>Stimulus</b>   looming {looming:0.00}   eye {eye}   from {source}",
                 $"<b>Light</b>       at fly {lightLevel:0.00}   vision {vision:0.00}   flashlight on fly {flashlightOnFly:0.00}",

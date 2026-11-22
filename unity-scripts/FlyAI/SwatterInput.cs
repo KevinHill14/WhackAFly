@@ -110,6 +110,11 @@ namespace FlyAI
                 }
             }
 
+            // The thumbstick is the main way to walk and turn; WASD is the backup for whatever the stick is not doing.
+            var stick = ImuReceiver.LiveStick;
+            if (stick.y != 0f) frame.forward = stick.y * ImuSwatter.StickForwardSign;
+            if (stick.x != 0f) frame.turn = stick.x * ImuSwatter.StickTurnSign;
+
             if (mouse != null)
             {
                 var delta = mouse.delta.ReadValue();

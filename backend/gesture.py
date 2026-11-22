@@ -31,6 +31,50 @@ def parse_sample(m):
     return t, vals[:3], vals[3:]
 
 
+def parse_controller(m):
+    """The thumbstick and its button, sent with each sample by current firmware: (x, y, pressed)."""
+    def number(key):
+        v = m.get(key)
+        return max(-1.0, min(1.0, float(v))) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else 0.0
+    return number("sx"), number("sy"), m.get("sb") in (1, True)
+
+
+class ControllerState:
+    """Adds up the swatter's rotation between messages to Unity, so no aim movement is lost."""
+    DEADZONE = 0.04    # rad/s: tiny rates are sensor noise and would make the aim creep
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.last_t = None
+        self.turn = [0.0, 0.0, 0.0]
+        self.gyro = [0.0, 0.0, 0.0]
+        self.stick = [0.0, 0.0]
+        self.down = False
+        self.pressed = False
+
+    def update(self, t_ms, gyro, stick_x, stick_y, down):
+        if self.last_t is not None:
+            dt = (t_ms - self.last_t) / 1000.0
+            if 0.0 < dt <= 0.1:
+                for k in range(3):
+                    if abs(gyro[k]) > self.DEADZONE:
+                        self.turn[k] += gyro[k] * dt
+        self.last_t = t_ms
+        self.gyro = list(gyro)
+        self.stick = [stick_x, stick_y]
+        self.down = down
+        self.pressed = self.pressed or down
+
+    def take(self):
+        msg = {"type": "controller", "dg": [round(v, 5) for v in self.turn], "g": [round(v, 3) for v in self.gyro],
+               "s": [round(v, 3) for v in self.stick], "b": 1 if self.pressed else 0}
+        self.turn = [0.0, 0.0, 0.0]
+        self.pressed = self.down
+        return msg
+
+
 def _dominant(v):
     return max(range(3), key=lambda k: abs(v[k]))
 

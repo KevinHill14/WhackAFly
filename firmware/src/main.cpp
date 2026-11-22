@@ -20,17 +20,25 @@
 #include <Wire.h>
 #include <Adafruit_LSM6DSOX.h>
 
-// ---- WiFi: the Raspberry Pi is the hotspot (everything joins WhackAFly-AP) --
-constexpr char WIFI_SSID[] = "WhackAFly-AP";
-constexpr char WIFI_PASSWORD[] = "whackafly123";
+// ---- WiFi: the name and password are in the git-ignored wifi_secrets.h --------
+// Copy firmware/src/wifi_secrets.example.h to wifi_secrets.h and fill it in.
+#include "wifi_secrets.h"
 // -----------------------------------------------------------------------------
 
 // ---- WebSocket (Raspberry Pi training-data server) --------------------------
-// The Pi's address on its own hotspot, and the game backend's swatter stream port (see backend/README.md).
-// To record on the laptop instead, set PI_HOST to the laptop's address on the Pi's hotspot.
-constexpr char PI_HOST[] = "192.168.4.1";
+// The Pi's address on the hotspot, and the game backend's swatter stream port (see backend/README.md).
+constexpr char PI_HOST[] = "172.20.10.10";
 constexpr uint16_t PI_PORT = 8767;
 constexpr char PI_WS_PATH[] = "/";
+// -----------------------------------------------------------------------------
+
+// ---- Thumbstick (walk and turn) ----------------------------------------------
+// VCC -> 3V3, GND -> GND, X -> D0, Y -> D1. Leave it untouched while the board starts.
+constexpr int PIN_STICK_X = D0;
+constexpr int PIN_STICK_Y = D1;
+constexpr int PIN_STICK_PRESS = D2;   // Shorts to GND when pressed.
+constexpr int STICK_ADC_MAX = 4095;
+constexpr float STICK_DEADZONE = 0.15f;
 // -----------------------------------------------------------------------------
 
 // ---- Tunables ---------------------------------------------------------------
@@ -52,6 +60,38 @@ uint32_t lastMoveMs = 0;
 uint32_t lastSwingMs = 0;
 
 static const char AXIS_NAME[3] = {'X', 'Y', 'Z'};
+
+int stickCenterX = 2048, stickCenterY = 2048;
+bool stickFound = false;      // false if the pins do not rest mid-range (no stick wired): it then reads as centred
+float stickX = 0, stickY = 0;
+bool stickPressed = false;
+
+static int readStickPin(int pin) {
+  long sum = 0;
+  for (int i = 0; i < 4; i++) sum += analogRead(pin);
+  return sum / 4;
+}
+
+static void calibrateStick() {
+  long sx = 0, sy = 0;
+  for (int i = 0; i < 50; i++) {
+    sx += readStickPin(PIN_STICK_X);
+    sy += readStickPin(PIN_STICK_Y);
+    delay(4);
+  }
+  stickCenterX = sx / 50;
+  stickCenterY = sy / 50;
+  stickFound = stickCenterX > 1200 && stickCenterX < 2900 && stickCenterY > 1200 && stickCenterY < 2900;
+  Serial.printf("Thumbstick %s (centre %d, %d)\n", stickFound ? "found" : "NOT found", stickCenterX, stickCenterY);
+}
+
+// -1..1 around the centre, ramping up from 0 at the edge of the deadzone.
+static float stickValue(int raw, int center) {
+  float v = raw >= center ? float(raw - center) / float(STICK_ADC_MAX - center) : float(raw - center) / float(center);
+  v = constrain(v, -1.0f, 1.0f);
+  if (fabsf(v) < STICK_DEADZONE) return 0.0f;
+  return (v < 0 ? -1.0f : 1.0f) * (fabsf(v) - STICK_DEADZONE) / (1.0f - STICK_DEADZONE);
+}
 
 // Ranges and rates, set at start-up and again if the sensor has to be restarted.
 static void configureImu() {
@@ -123,9 +163,16 @@ void setup() {
   Serial.begin(115200);
   uint32_t start = millis();
   while (!Serial && millis() - start < 3000) delay(10);  // wait for USB serial
+  Serial.setTxTimeoutMs(0);  // With no USB reader attached, printing must never stall the sensor stream.
   Serial.println("\nLSM6DSOX motion test (XIAO ESP32S3)");
 
+  // Say why Wi-Fi fails: it is the first thing to check when the swatter does not reach the Pi.
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) Serial.printf("WiFi got address %s\n", WiFi.localIP().toString().c_str());
+    else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) Serial.printf("WiFi not connected, reason %d\n", info.wifi_sta_disconnected.reason);
+  });
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);      // Power saving would delay the 200 Hz stream.
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
   // Wait up to 8 s, then carry on without Wi-Fi: the USB serial stream (send 'p') must work even when the
@@ -136,7 +183,23 @@ void setup() {
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) Serial.printf("\nWiFi connected, IP address: %s\n", WiFi.localIP().toString().c_str());
-  else Serial.println("\nNo WiFi yet (continuing; still retrying in the background).");
+  else {
+    Serial.println("\nNo WiFi yet (continuing; still retrying in the background).");
+    WiFi.disconnect();                    // A scan fails while a connection attempt is running.
+    delay(200);
+    int found = WiFi.scanNetworks();
+    for (int i = 0; i < found && i < 6; i++) Serial.printf("  sees \"%s\" %d dBm ch %d\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
+    bool seen = false;
+    for (int i = 0; i < found; i++) {
+      if (WiFi.SSID(i) == WIFI_SSID) {
+        seen = true;
+        Serial.printf("Hotspot visible: signal %d dBm, channel %d\n", WiFi.RSSI(i), WiFi.channel(i));
+      }
+    }
+    if (!seen) Serial.printf("Hotspot NOT visible (%d other networks seen). Check the antenna.\n", found);
+    WiFi.scanDelete();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
 
   webSocket.begin(PI_HOST, PI_PORT, PI_WS_PATH);
   webSocket.onEvent(webSocketEvent);
@@ -154,6 +217,9 @@ void setup() {
 
   configureImu();
 
+  analogReadResolution(12);
+  pinMode(PIN_STICK_PRESS, INPUT_PULLUP);
+  calibrateStick();
   calibrate();
 }
 
@@ -200,18 +266,29 @@ void loop() {
     linear[k] = accel[k] - gravity[k];
   }
 
+  static uint8_t stickTick = 0;
+  if (stickFound && ++stickTick >= 4) {     // 50 Hz is plenty, and keeps the sensor loop at 200 Hz
+    stickTick = 0;
+    stickX = stickValue(readStickPin(PIN_STICK_X), stickCenterX);
+    stickY = stickValue(readStickPin(PIN_STICK_Y), stickCenterY);
+    static bool lastPress = false;        // Two matching reads 20 ms apart, so contact bounce is ignored.
+    bool press = digitalRead(PIN_STICK_PRESS) == LOW;
+    if (press == lastPress) stickPressed = press;
+    lastPress = press;
+  }
+
   if (streamRaw) {
     // Format works with the Arduino/PlatformIO serial plotter.
     // ax/ay/az (raw, gravity included) match what the Wi-Fi stream sends, so USB recordings can train the same model.
-    Serial.printf("lx:%.2f ly:%.2f lz:%.2f gx:%.2f gy:%.2f gz:%.2f ax:%.3f ay:%.3f az:%.3f\n",
-                  linear[0], linear[1], linear[2], gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]);
+    Serial.printf("lx:%.2f ly:%.2f lz:%.2f gx:%.2f gy:%.2f gz:%.2f ax:%.3f ay:%.3f az:%.3f sx:%.2f sy:%.2f sb:%d\n",
+                  linear[0], linear[1], linear[2], gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2], stickX, stickY, stickPressed ? 1 : 0);
   }
 
   // Stream every sample to the Pi for training-data collection.
-  char json[160];
+  char json[220];
   snprintf(json, sizeof(json),
-           "{\"t\":%lu,\"ax\":%.4f,\"ay\":%.4f,\"az\":%.4f,\"gx\":%.4f,\"gy\":%.4f,\"gz\":%.4f}",
-           (unsigned long)now, accel[0], accel[1], accel[2], gyro[0], gyro[1], gyro[2]);
+           "{\"t\":%lu,\"ax\":%.4f,\"ay\":%.4f,\"az\":%.4f,\"gx\":%.4f,\"gy\":%.4f,\"gz\":%.4f,\"sx\":%.2f,\"sy\":%.2f,\"sb\":%d}",
+           (unsigned long)now, accel[0], accel[1], accel[2], gyro[0], gyro[1], gyro[2], stickX, stickY, stickPressed ? 1 : 0);
   webSocket.sendTXT(json);
 
   // Swing: strong rotation about one axis. Checked first, because swinging

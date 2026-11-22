@@ -34,6 +34,17 @@ from swatter_ml import takes as T  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 PREFERRED_ORDER = ["idle", "aiming", "swing", "flick", "bump"]
+# The game only needs one decision: swat or not. Takes keep their recorded labels on disk.
+TWO_CLASSES = {"swing": "swing", "flick": "swing", "idle": "idle", "aiming": "idle", "bump": "idle"}
+
+
+def merge_labels(takes):
+    """Swing and flick become "swing"; idle, aiming and bump become "idle", with no strength."""
+    out = []
+    for t in takes:
+        label = TWO_CLASSES.get(t["label"], t["label"])
+        out.append({**t, "label": label, "strength": t.get("strength") if label == "swing" else 0.0})
+    return out
 
 
 def class_order(found):
@@ -148,6 +159,7 @@ def main():
     ap.add_argument("--rotate", type=float, default=25.0, help="max degrees of random rotation in augmented copies")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-takes", type=int, default=10)
+    ap.add_argument("--five-classes", action="store_true", help="keep idle/aiming/swing/flick/bump separate")
     a = ap.parse_args()
 
     log = io.StringIO()
@@ -175,6 +187,8 @@ def run(a):
     if bad:     # Left on disk, just not trained on.
         print(f"skipping {len(bad)} takes where the sensor dropped out: {', '.join(str(t.get('id')) for t in bad)}")
         takes = [t for t in takes if not T.dropout(t["samples"])]
+    if not a.five_classes:
+        takes = merge_labels(takes)
     print(f"{len(takes)} takes from {', '.join(a.data)}")
     if len(takes) < a.min_takes:
         raise SystemExit(f"need at least {a.min_takes} takes to train (have {len(takes)})")
@@ -251,6 +265,10 @@ def run(a):
         acc = float((pred == yte).mean())
         mae = float(np.abs(kp["strength"][:, 0] - ste).mean() * 10)
         m = confusion(yte, pred, K)
+        if "swing" in labels and (yte == labels.index("swing")).any():
+            on_swings = yte == labels.index("swing")
+            swing_mae = float(np.abs(kp["strength"][on_swings, 0] - ste[on_swings]).mean() * 10)
+            print(f"strength error on swings only: {swing_mae:.2f} / 10")
         print(f"\nheld-out test: {len(Xte)} takes   Keras accuracy {acc * 100:.1f}%   strength error {mae:.2f} / 10")
         print_confusion(m, labels, "Confusion matrix, Keras float")
         report["keras"] = {"accuracy": acc, "strength_mae": mae, "confusion": m}

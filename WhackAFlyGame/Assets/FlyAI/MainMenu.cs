@@ -29,6 +29,8 @@ namespace FlyAI
         Task<string> ingestTask;
         float nextPoll;
         float loadStarted;
+        float brainCheckAt = -1f;
+        float nextRelocate;
 
         // Phone upload screen.
         string uploadStartId = "";
@@ -79,7 +81,7 @@ namespace FlyAI
         void Awake()
         {
             Application.quitting += GameServices.Shutdown;
-            GameServices.StartBrain();
+            brainCheckAt = Time.unscaledTime + (BackendClient.Enabled ? 3.5f : 0f); // The Pi's brain is used if it answers.
             GameServices.StartImu();
             RoomLoader.RoomLoaded += OnRoomLoaded;
             RoomLoader.LoadFailed += OnLoadFailed;
@@ -108,6 +110,7 @@ namespace FlyAI
         {
             GameServices.StopUploadServer();
             mode = Mode.Main;
+            MenuCursor.Reset();
             Active = false;
             SetPaused(false);
         }
@@ -121,6 +124,7 @@ namespace FlyAI
         void Show()
         {
             Active = true;
+            MenuCursor.Reset();
             mode = Mode.Main;
             notice = "";
             if (loader != null) loader.Unload(); // The room for the next round then loads again behind the menu.
@@ -160,8 +164,14 @@ namespace FlyAI
 
         void Update()
         {
-            if (!Active) return;
+            if (!Active)
+            {
+                ImuReceiver.TakePress(); // The stick's press only means something in the menu.
+                return;
+            }
             if (Cursor.lockState != CursorLockMode.None) FreeCursor();
+            MenuCursor.Tick();
+            UpdateRunLocation();
             if (Time.timeScale != 0f) Time.timeScale = 0f;
             if (loader == null) loader = FindFirstObjectByType<RoomLoader>();
 
@@ -184,6 +194,23 @@ namespace FlyAI
                 if (mode == Mode.Upload) PollUpload();
             }
             if (mode == Mode.Loading && Time.unscaledTime - loadStarted > 90f) OnLoadFailed("it took too long");
+        }
+
+        // Runs the fly on the Pi whenever it is reachable, and on this laptop when it is not.
+        void UpdateRunLocation()
+        {
+            if (brainCheckAt >= 0f && Time.unscaledTime >= brainCheckAt)
+            {
+                brainCheckAt = -1f;
+                if (!BackendClient.Connected) GameServices.StartBrain();
+            }
+            var fly = FlyAgent.Current;
+            if (fly == null || loader == null || loader.IsLoading || fly.IsRemote == BackendClient.Connected) return;
+            if (Time.unscaledTime < nextRelocate) return;
+            nextRelocate = Time.unscaledTime + 5f;
+            if (!BackendClient.Connected) GameServices.StartBrain();
+            loader.Unload(); // The level is rebuilt behind the menu, with the fly in the right place.
+            RefreshLevel();
         }
 
         void PollUpload()
@@ -329,8 +356,10 @@ namespace FlyAI
 
             columnWidth = Mathf.Min(640f, width - 40f);
             var area = new Rect((width - columnWidth) * 0.5f, height * 0.07f, columnWidth, height * 0.88f);
+            var backgroundOnly = MenuCursor.Begin(Event.current, (int)mode); // The thumbstick steps through the items.
             GUI.DrawTexture(new Rect(0f, 0f, width, height), solid);
             DrawBackground(width, height);
+            if (backgroundOnly) return;
             GUILayout.BeginArea(area);
             switch (mode)
             {
@@ -340,6 +369,13 @@ namespace FlyAI
             }
             GUILayout.EndArea();
             if (mode == Mode.Main) LocalScores.Draw(width, unit, (width - columnWidth) * 0.5f - 20f);
+            if (mode == Mode.Main && BackendClient.Current != null)
+            {
+                var strip = new Rect(14f, height - 40f, Mathf.Min(560f, width - 28f), 28f);
+                MenuStyle.Box(strip, new Color(0.05f, 0.06f, 0.08f, 0.82f), 10);
+                MenuStyle.Text(new Rect(strip.x + 12f, strip.y, strip.width - 20f, strip.height), BackendClient.StatusLine(), unit * 0.72f, MenuStyle.Light, TextAnchor.MiddleLeft, true);
+            }
+            MenuCursor.End();
         }
 
         // A button that is smaller than its slot but sits in the middle of it, so the layout does not move.
@@ -350,11 +386,18 @@ namespace FlyAI
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
             var clicked = GUILayout.Button(text, style, GUILayout.Width(columnWidth * widthFraction), GUILayout.Height(slotHeight * 0.8f));
+            clicked |= MenuCursor.Hit(GUILayoutUtility.GetLastRect(), style == playStyle);
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUILayout.FlexibleSpace();
             GUILayout.EndVertical();
             return clicked;
+        }
+
+        bool StickButton(string text, float unit)
+        {
+            var clicked = GUILayout.Button(text, buttonStyle, GUILayout.Height(unit * 3f));
+            return MenuCursor.Hit(GUILayoutUtility.GetLastRect()) || clicked;
         }
 
         // The picture: a hallway, a person chasing the fly with a swatter. The fly (left) bobs and flutters, and the
@@ -427,7 +470,7 @@ namespace FlyAI
         {
             DrawHeader("");
 
-            var online = GameServices.BrainOnline;
+            var online = GameServices.BrainOnline || BackendClient.Connected;
             Pill("Current World");
             GUILayout.Space(unit * 0.2f);
             var levelText = busy ? "Processing...  (click to choose another)" : levelLabel.Length > 0 ? levelLabel : "Choose LiDAR file...";
@@ -477,6 +520,7 @@ namespace FlyAI
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
             var picked = Mathf.RoundToInt(GUILayout.HorizontalSlider(level, 0f, 2f, GUILayout.Width(columnWidth * 0.6f), GUILayout.Height(unit * 0.9f)));
+            if (MenuCursor.Hit(GUILayoutUtility.GetLastRect())) picked = (level + 1) % 3; // A press steps Easy, Medium, Hard.
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUILayout.FlexibleSpace();
@@ -523,8 +567,8 @@ namespace FlyAI
             {
                 // Another phone (or another scan) can use the same QR code without leaving this screen.
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Upload another", buttonStyle, GUILayout.Height(unit * 3f))) uploadStartId = levelId;
-                if (GUILayout.Button("Return to main menu", buttonStyle, GUILayout.Height(unit * 3f))) CloseUpload();
+                if (StickButton("Upload another", unit)) uploadStartId = levelId;
+                if (StickButton("Return to main menu", unit)) CloseUpload();
                 GUILayout.EndHorizontal();
             }
             else if (SlotButton("Return to main menu", buttonStyle, unit * 3f, 0.7f)) CloseUpload();

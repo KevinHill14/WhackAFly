@@ -5,6 +5,7 @@ Enough for JSON text messages between the brain, hub and game: handshake
 Written so the brain needs nothing but Python + NumPy on the QNX Pi.
 """
 import asyncio
+import asyncio.selector_events as _selector_events
 import base64
 import hashlib
 import os
@@ -14,6 +15,11 @@ from urllib.parse import urlparse
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 MAX_MESSAGE = 1 << 20
+
+# QNX reports "no fixed limit" (-1) for SC_IOV_MAX. asyncio uses that number directly, so the first time data had to
+# queue on a socket (slow Wi-Fi, a client not reading) the connection failed with an islice ValueError.
+if getattr(_selector_events, "SC_IOV_MAX", 1) <= 0:
+    _selector_events.SC_IOV_MAX = 1024
 
 
 class ConnectionClosed(Exception):
@@ -58,7 +64,9 @@ class WebSocket:
     async def send(self, text):
         try:
             await self._send_frame(OP_TEXT, text.encode())
-        except (ConnectionError, OSError) as e:
+        except Exception as e:              # Whatever broke the transport, this connection is finished.
+            if isinstance(e, ConnectionClosed):
+                raise
             self.closed = True
             raise ConnectionClosed() from e
 
@@ -74,7 +82,10 @@ class WebSocket:
                 raise ConnectionClosed("frame too large")
             mask = await self.reader.readexactly(4) if b2 & 0x80 else None
             data = await self.reader.readexactly(n)
-        except (asyncio.IncompleteReadError, ConnectionError, OSError) as e:
+        except ConnectionClosed:
+            self.closed = True
+            raise
+        except Exception as e:              # A failed stream fails every later read too, so never retry it.
             self.closed = True
             raise ConnectionClosed() from e
         if mask:
@@ -106,6 +117,14 @@ class WebSocket:
             if fin and opcode is not None:
                 msg = b"".join(parts)
                 return msg.decode("utf-8", "replace")
+
+    def abort(self):
+        """Drop the connection now, without waiting on a peer that may have stopped reading."""
+        self.closed = True
+        try:
+            self.writer.transport.abort()
+        except Exception:
+            pass
 
     async def close(self):
         if not self.closed:

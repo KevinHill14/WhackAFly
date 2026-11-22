@@ -14,6 +14,14 @@ A session is a shuffled list of swings (six directions at strengths 3, 6 and 10)
 that must NOT count as a swing: holding still, aiming slowly, a small wrist flick, a bump. Run it again
 for more data (--rounds 2 for two passes). Takes land in swatter_ml/data/takes/ (git-ignored), with the
 direction saved as extra information. Train with:  .venv\Scripts\python -m swatter_ml.train
+
+Fill the gaps (only the non-swings the data is short of, hands-free):
+
+    .venv\Scripts\python -m swatter_ml.record --person kevin --fill
+
+Press SPACE once and it runs every prompt in a row by itself. A take that does not match its prompt is
+not saved and the prompt repeats.   P pause   S skip   U undo the last take   Q quit
+--target sets how many takes each non-swing class should end up with (default 20).
 """
 import argparse
 import asyncio
@@ -54,6 +62,26 @@ OTHERS = [
     ("bump", "", 5, "BUMP the swatter lightly against something (a table, your leg)"),
     ("bump", "", 5, "Bump it against something again, a bit harder"),
 ]
+
+# --fill: more varied non-swings, including the near misses the model confuses with a swing.
+FILL_PROMPTS = {
+    "idle": [(0, "Hold the swatter STILL, ready to swing"),
+             (0, "Hold it STILL, down at your side"),
+             (0, "Hold it STILL, up by your shoulder"),
+             (0, "Hold it still, then lower it SLOWLY")],
+    "aiming": [(0, "AIM slowly: point it around the room"),
+               (0, "AIM slowly: track a fly across the wall"),
+               (0, "AIM slowly: from the floor up to the ceiling"),
+               (0, "AIM slowly: draw a small circle in the air")],
+    "flick": [(4, "Small WRIST FLICK upward, not a full swing"),
+              (4, "Small WRIST FLICK downward, not a full swing"),
+              (4, "Small WRIST FLICK to the left, not a full swing"),
+              (4, "Small WRIST FLICK to the right, not a full swing")],
+    "bump": [(5, "BUMP it lightly against the table"),
+             (5, "BUMP it lightly against your leg"),
+             (5, "TAP it twice, lightly, on the table"),
+             (5, "BUMP it lightly against the wall or a chair")],
+}
 
 RESET, BOLD, DIM = "\x1b[0m", "\x1b[1m", "\x1b[2m"
 RED, GREEN, YELLOW, CYAN, GREY = "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[36m", "\x1b[90m"
@@ -215,6 +243,37 @@ def build_session(rounds, seed=None):
     return items
 
 
+def build_fill(found, target, seed=None):
+    """Just enough of each non-swing to bring it up to `target` takes, shuffled so the labels mix."""
+    rng = random.Random(seed)
+    items = []
+    for label, prompts in FILL_PROMPTS.items():
+        order = list(prompts)
+        rng.shuffle(order)
+        for i in range(max(0, target - found.get(label, 0))):
+            strength, text = order[i % len(order)]
+            items.append({"label": label, "direction": "", "strength": strength, "text": text})
+    rng.shuffle(items)
+    return items
+
+
+def fill_problem(label, rows):
+    """Why this take does not match its prompt, or ''. The limits come from the takes already recorded."""
+    gyro = max(math.sqrt(r[4] ** 2 + r[5] ** 2 + r[6] ** 2) for r in rows)
+    jolt = max(abs(math.sqrt(r[1] ** 2 + r[2] ** 2 + r[3] ** 2) - 9.81) for r in rows)
+    if label == "idle" and gyro > 2.6:
+        return f"that moved too much ({gyro:.1f} rad/s). Hold it steadier."
+    if label == "aiming" and gyro < 0.4:
+        return "it barely moved. Keep it moving, slowly."
+    if label == "aiming" and gyro > 3.0:
+        return f"that was too fast for aiming ({gyro:.1f} rad/s). Slower."
+    if label == "flick" and gyro < 5.0:
+        return f"that flick was too small ({gyro:.1f} rad/s). A bit snappier."
+    if label == "bump" and jolt < 8.0:
+        return "I did not feel a bump. Tap it a little firmer."
+    return ""
+
+
 def counts():
     found = {}
     for t in T.load_all():
@@ -262,6 +321,9 @@ def bar(value, total, width=20, color=GREEN):
     return color + "█" * filled + GREY + "░" * (width - filled) + RESET
 
 
+FOOTER = "[SPACE] record    [S] skip    [U] undo last take    [Q] quit"
+
+
 def frame(stream, session, index, state, found, message, big="", sub=""):
     n = len(session)
     status = f"{GREEN}● live {stream.rate} Hz{RESET}" if stream.live else f"{RED}● NO DATA from the ESP32{RESET}"
@@ -299,7 +361,7 @@ def frame(stream, session, index, state, found, message, big="", sub=""):
         lines.append(f" Sensor   {RED}no readings yet{RESET}")
         lines.append("")
     lines.append(" Saved so far:  " + "   ".join(f"{k} {v}" for k, v in sorted(found.items())) if found else " Saved so far:  nothing yet")
-    lines.append(f" {DIM}[SPACE] record    [S] skip    [U] undo last take    [Q] quit{RESET}")
+    lines.append(f" {DIM}{FOOTER}{RESET}")
     return lines
 
 
@@ -337,19 +399,33 @@ async def run(args):
                 break
         if usb.error:
             raise SystemExit(usb.error)
-    session = build_session(args.rounds)
-    screen = Screen()
+    global FOOTER
     found = counts()
+    if args.fill:
+        session = build_fill(found, args.target)
+        if not session:
+            if usb:
+                usb.stop = True
+            print(f"Nothing to fill: every non-swing class already has {args.target} takes. Raise --target for more.")
+            return
+        FOOTER = "[SPACE] start / resume    [P] pause    [S] skip    [U] undo last take    [Q] quit"
+    else:
+        session = build_session(args.rounds)
+    screen = Screen()
     index = 0
     last_id = None
-    message = "Hold the swatter ready, then press SPACE."
+    running = False                     # --fill: moving through the prompts by itself
+    message = (f"{len(session)} takes, about {len(session) * (args.countdown + args.seconds) / 60:.0f} minutes. "
+               "Press SPACE once and it runs by itself." if args.fill else "Hold the swatter ready, then press SPACE.")
     auto = args.auto
     warned_linear = False
     try:
         while True:
+            if args.fill and index >= len(session):
+                break
             # ---- waiting for the player ----
-            key = ""
-            while True:
+            key = " " if args.fill and running else ""
+            while not key:
                 if auto:
                     key = " " if stream.live else ""
                 else:
@@ -365,6 +441,7 @@ async def run(args):
                                f"so these takes will not match the Wi-Fi stream.{RESET}")
                 if key in ("q", " ", "s", "u") or (auto and key):
                     break
+                key = ""
                 await asyncio.sleep(0.05)
             if key == "q":
                 break
@@ -389,10 +466,39 @@ async def run(args):
                 message = f"{RED}No data from the ESP32 yet, so I cannot record.{RESET}"
                 continue
             # ---- countdown, then record ----
+            running = args.fill
             item = session[index]
+            pressed = ""
             for n in range(args.countdown, 0, -1):
-                screen.draw(frame(stream, session, index, "count", found, "", f"{YELLOW}{n}{RESET}", "Get ready..."))
-                await asyncio.sleep(1 if not auto else 0.2)
+                screen.draw(frame(stream, session, index, "count", found, message if args.fill else "",
+                                  f"{YELLOW}{n}{RESET}", "Get ready..."))
+                until = time.monotonic() + (1 if not auto else 0.2)
+                while time.monotonic() < until and not pressed:
+                    k = read_key() if args.fill and not auto else ""
+                    if k in ("q", "p", "s", "u"):
+                        pressed = k
+                    await asyncio.sleep(0.03)
+                if pressed:
+                    break
+            if pressed == "q":
+                break
+            if pressed == "p":
+                running = False
+                message = f"{YELLOW}Paused. Press SPACE to carry on.{RESET}"
+                continue
+            if pressed == "s":
+                index += 1
+                message = "Skipped."
+                continue
+            if pressed == "u":
+                if last_id and T.delete(last_id):
+                    found = counts()
+                    index = max(0, index - 1)
+                    message = f"{YELLOW}Deleted the last take. Do that prompt again.{RESET}"
+                    last_id = None
+                else:
+                    message = "Nothing to undo."
+                continue
             stream.rows = []
             stream.recording = True
             start = time.monotonic()
@@ -416,12 +522,17 @@ async def run(args):
             if len(rows) < 50:
                 message = f"{RED}{warning}{RESET}"
                 continue
+            if args.fill:
+                problem = fill_problem(item["label"], rows)
+                if problem:
+                    message = f"{RED}Not saved: {problem} Same prompt again.{RESET}"
+                    continue
             take = T.make_take(rows, item["label"], item["strength"], args.person, "guided", "live", stream.peer)
             if item["direction"]:
                 take["direction"] = item["direction"]
             T.save(take)
             last_id = take["id"]
-            found = counts()
+            found[item["label"]] = found.get(item["label"], 0) + 1      # re-reading every take would stall the loop
             index += 1
             message = f"{GREEN}Saved{RESET} ({len(rows)} samples, {take['sample_rate_hz']} Hz)."
             if warning:
@@ -445,6 +556,8 @@ def main():
     ap.add_argument("--rounds", type=int, default=1, help="how many passes through the whole prompt list")
     ap.add_argument("--seconds", type=float, default=2.0, help="length of each take")
     ap.add_argument("--countdown", type=int, default=3)
+    ap.add_argument("--fill", action="store_true", help="record only the non-swings the data is short of, all in a row")
+    ap.add_argument("--target", type=int, default=20, help="--fill: takes each non-swing class should end up with")
     ap.add_argument("--auto", action="store_true", help="testing: press SPACE automatically")
     args = ap.parse_args()
     try:
