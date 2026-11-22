@@ -109,7 +109,7 @@ class Backend:
             self.last_pose = now
         elif t == "swing":
             hit = self.game.swing(m["origin"], m["dir"], m.get("strength", 0.6),
-                                  m.get("reach", SWAT_REACH))
+                                  m.get("reach", SWAT_REACH), m.get("dirs"))
             await self.send_all({"type": "swing_result", "hit": hit, "score": self.game.score})
         elif t == "reset":
             self.game.reset()

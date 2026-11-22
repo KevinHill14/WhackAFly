@@ -106,6 +106,9 @@ namespace FlyAI
         List<Vector3> roomOutline;
         Vector3 safePosition;
         float swingStartedAt = -10f;
+        Vector2 swingStroke; // The last swing's direction (degrees of aim), for the animation. Zero: classic chop.
+        const float SweepStepDegrees = 4f; // Directional swings test the arc in steps this small (the swatter is ~3.4 deg wide at full reach).
+        readonly List<Vector3> sweptDirections = new List<Vector3>();
         string message = "Find the fly";
         AudioSource playerAudio;
         Coroutine hitStop;
@@ -300,7 +303,7 @@ namespace FlyAI
                 if (RoomAtmosphere.Current != null) RoomAtmosphere.Current.Ping();
                 message = "Ping";
             }
-            if (frame.swing && Time.time - swingStartedAt >= SwingCooldown && (GameRound.Current == null || GameRound.Current.CanSwing)) Swing(frame.swingStrength);
+            if (frame.swing && Time.time - swingStartedAt >= SwingCooldown && (GameRound.Current == null || GameRound.Current.CanSwing)) Swing(frame.swingStrength, frame.swingStroke);
             AnimateSwatter();
             BackendClient.SendPose(head.position, aimPivot.forward, swatReach);
         }
@@ -391,13 +394,27 @@ namespace FlyAI
             return transform.rotation * chosen;
         }
 
-        public void Swing(float strength)
+        public void Swing(float strength) => Swing(strength, Vector2.zero);
+
+        // stroke: which way the real swing went, in degrees of aim (x = right, y = up). The swatter sweeps from the
+        // aim along that arc and stops at the first thing in the way; the fly is hit anywhere on the swept part.
+        // Zero is the classic chop straight along the aim.
+        public void Swing(float strength, Vector2 stroke)
         {
             swingStartedAt = Time.time;
+            swingStroke = stroke;
             playerAudio.PlayOneShot(FlySounds.Get("swing_whoosh"), Mathf.Lerp(0.3f, 0.6f, strength));
-            var direction = AimBeforeSwing() * Vector3.forward;
-            FlyAgent.Current?.OnSwing(head.position, direction, swatRadius, swatReach, strength);
-            BackendClient.SendSwing(head.position, direction, strength, swatReach);
+            var aim = AimBeforeSwing();
+            var direction = aim * Vector3.forward;
+            sweptDirections.Clear();
+            var threatDirection = direction;
+            if (stroke.sqrMagnitude > 0.0001f)
+            {
+                direction = SweepArc(aim, stroke, sweptDirections);
+                threatDirection = aim * Quaternion.Euler(-stroke.y * 0.5f, stroke.x * 0.5f, 0f) * Vector3.forward;
+            }
+            FlyAgent.Current?.OnSwing(head.position, threatDirection, swatRadius, swatReach, strength);
+            BackendClient.SendSwing(head.position, direction, strength, swatReach, sweptDirections);
             var result = new SwingResult { time = Time.time, strength = strength, target = "nothing" };
 
             var count = Physics.SphereCastNonAlloc(head.position, swatRadius, direction, hits, swatReach, ~0, QueryTriggerInteraction.Ignore);
@@ -472,6 +489,9 @@ namespace FlyAI
             }
             // The fly is hit if it is inside the swatter's hit zone: the same spot the imprint lands.
             var impactDistance = part == null ? swatReach : (nearest < float.MaxValue ? nearest : nearestBoundary);
+            // A directional swing passed through these directions before it landed, at full reach.
+            foreach (var swept in sweptDirections)
+                FlyAgent.Current?.TrySwat(head.position, swept, swatRadius, swatReach + swatRadius);
             FlyAgent.Current?.TrySwat(head.position, direction, swatRadius, Mathf.Min(impactDistance, swatReach) + swatRadius);
 
             // Every swing makes a sound the fly can hear: a thud where it lands, or a whoosh if it misses.
@@ -572,12 +592,47 @@ namespace FlyAI
             }
         }
 
+        // Steps from the aim along the stroke and returns the first direction whose cast hits part of the room
+        // (or the end of the arc). The directions passed on the way go into `passed`.
+        Vector3 SweepArc(Quaternion aim, Vector2 stroke, List<Vector3> passed)
+        {
+            var steps = Mathf.Max(1, Mathf.CeilToInt(stroke.magnitude / SweepStepDegrees));
+            var direction = aim * Vector3.forward;
+            for (var i = 0; i <= steps; i++)
+            {
+                var offset = stroke * (i / (float)steps);
+                direction = aim * Quaternion.Euler(-offset.y, offset.x, 0f) * Vector3.forward;
+                if (SweepHits(direction)) return direction;
+                if (i < steps) passed.Add(direction);
+            }
+            return direction;
+        }
+
+        bool SweepHits(Vector3 direction)
+        {
+            var count = Physics.SphereCastNonAlloc(head.position, swatRadius, direction, hits, swatReach, ~0, QueryTriggerInteraction.Ignore);
+            for (var i = 0; i < count; i++)
+                if (hits[i].collider != body && hits[i].distance > 0f && hits[i].collider.GetComponent<RoomPart>() != null) return true;
+            return false;
+        }
+
         void AnimateSwatter()
         {
             var t = (Time.time - swingStartedAt) / SwingDuration;
             var angle = -20f;
             if (t < 1f) angle = Mathf.Lerp(-20f, 70f, Mathf.Sin(t * Mathf.PI));
-            swatter.localRotation = Quaternion.Euler(angle, 0f, -8f);
+            if (t < 1f && swingStroke.sqrMagnitude > 0.0001f)
+            {
+                // The classic chop brings the head down from above. Roll it about the aim so "down" points along the
+                // stroke: a swing to the left starts with the head out to the right and sweeps left, an up-left
+                // swing is a backhand from below right. Straight down is no roll: the classic chop exactly. Eased in
+                // and out of the resting pose so the swatter doesn't snap at either end.
+                var roll = Mathf.Atan2(swingStroke.x, -swingStroke.y) * Mathf.Rad2Deg;
+                var pose = Quaternion.AngleAxis(roll, Vector3.forward) * Quaternion.Euler(angle, 0f, -8f);
+                var ease = Mathf.Clamp01(Mathf.Min(t, 1f - t) / 0.15f);
+                swatter.localRotation = Quaternion.Slerp(Quaternion.Euler(-20f, 0f, -8f), pose, ease);
+            }
+            else swatter.localRotation = Quaternion.Euler(angle, 0f, -8f);
             UpdateShake();
         }
 

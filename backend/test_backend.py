@@ -25,6 +25,13 @@ def unit_tests():
     check(g.state == "dead" and g.score == 1, "swing along the line squishes the fly")
     g2 = FlyGame(random.Random(1)); g2.set_room(SPOTS, [0, 1.6, 0])
     check(not g2.swing([0, 1.0, 0], [1, 0, 0], 0.8) and g2.score == 0, "swing the wrong way misses")
+    # Directional swings: the swatter sweeps an arc, and the fly is hit anywhere on the swept part.
+    g6 = FlyGame(random.Random(1)); g6.set_room(SPOTS, [0, 1.6, 0])
+    check(g6.swing([0, 1.0, 0.8], [1, 0, 0], 0.8, swept=[[0.5, 0, 0.5], [0, 0, 1]]) and g6.swings == 1,
+          "the fly is hit by a swept direction even when the landing direction misses; counted as one swing")
+    g7 = FlyGame(random.Random(1)); g7.set_room(SPOTS, [0, 1.6, 0])
+    check(not g7.swing([0, 1.0, 0], [1, 0, 0], 0.8, swept=[[1, 0.2, 0], "x", [0, None, 1], [float("nan"), 0, 1]])
+          and g7.swings == 1, "bad swept directions are skipped, not a crash; a sweep away from the fly misses")
     for _ in range(300): g.tick()
     check(g.state != "dead", "fly respawns after being squished")
     g3 = FlyGame(random.Random(2)); g3.set_room(SPOTS, [0, 1.6, 0]); g3.pos = [1.6, 1.0, 2.0]; g3.spot = 2

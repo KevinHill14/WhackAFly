@@ -117,17 +117,25 @@ class FlyGame:
             self.tip_speed = _len(_sub(tip, self.tip)) / dt
         self.tip = tip
 
-    def swing(self, origin, direction, strength, reach=SWAT_REACH):
-        """Returns True if the fly was squished."""
+    def swing(self, origin, direction, strength, reach=SWAT_REACH, swept=None):
+        """Returns True if the fly was squished. `swept` (optional): more directions a directional swing
+        passed through before `direction`; the fly is hit if it is near any of them. One swing either way."""
         origin, direction = vec3(origin), vec3(direction)
+        lines = [direction]
+        if isinstance(swept, list):
+            for d in swept[:32]:
+                try:
+                    lines.append(vec3(d))
+                except (ValueError, TypeError):
+                    continue
         reach = float(reach) if isinstance(reach, (int, float)) and math.isfinite(reach) else SWAT_REACH
         if not self.active():            # no swinging during the countdown or after the round
             return False
         self.swings += 1
         if self.state in ("dead", "idle"):
             return False
-        end = _add(origin, _mul(_unit(direction), reach))
-        if _dist_point_segment(self.pos, origin, end) <= HIT_RADIUS:
+        if any(_dist_point_segment(self.pos, origin, _add(origin, _mul(_unit(d), reach))) <= HIT_RADIUS
+               for d in lines):
             self.state = "dead"
             self.timer = RESPAWN_S
             self.score += 1
