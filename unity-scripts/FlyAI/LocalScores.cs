@@ -33,6 +33,7 @@ namespace FlyAI
         static List<ScoreEntry> runs;
         public static SortKey Key = SortKey.Time;
         public static bool Reversed;
+        public static bool Visible; // Shown with the menu's Leaderboard button.
 
         static string FilePath => Environment.GetEnvironmentVariable("FLYAI_SCORES") ?? Path.Combine(Application.persistentDataPath, "FlyAI-scores.json");
 
@@ -103,12 +104,8 @@ namespace FlyAI
             {
                 label = new GUIStyle(GUI.skin.label) { richText = true, alignment = TextAnchor.MiddleLeft, wordWrap = false };
                 header = new GUIStyle(label) { fontStyle = FontStyle.Bold };
-                button = new GUIStyle(GUI.skin.button) { fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, wordWrap = false };
-                var normal = Solid(new Color(0.14f, 0.16f, 0.19f));
-                var hover = Solid(new Color(0.2f, 0.25f, 0.3f));
-                button.normal.background = button.focused.background = button.onNormal.background = button.onFocused.background = normal;
-                button.hover.background = button.active.background = button.onHover.background = button.onActive.background = hover;
-                button.normal.textColor = button.hover.textColor = button.active.textColor = button.focused.textColor = Color.white;
+                button = MenuStyle.Primary;
+                label.font = header.font = MenuStyle.UiFont;
                 label.normal.textColor = new Color(0.9f, 0.93f, 0.9f);
                 header.normal.textColor = new Color(0.65f, 0.72f, 0.66f);
             }
@@ -129,7 +126,7 @@ namespace FlyAI
         // The two buttons sit in the top right corner; the table is below them.
         public static void Draw(float screenWidth, float unit, float freeWidth)
         {
-            if (freeWidth < 260f) return; // No room beside the menu column.
+            if (!Visible || freeWidth < 260f) return; // No room beside the menu column.
             Styles(unit);
             var width = Mathf.Min(freeWidth, unit * 24f);
             var right = screenWidth - 14f;

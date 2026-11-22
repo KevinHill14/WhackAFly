@@ -1,14 +1,13 @@
 # Swing classifier: record, train, export
 
-Tools for the swatter's on-device model: record labelled swings from the real swatter, train a
-small classifier, export it as TensorFlow Lite for the QNX Raspberry Pi 5, and run it in the
-game backend in place of the threshold rules.
+Record labelled swings from the real swatter, train a small classifier, export it as TensorFlow Lite
+for the Raspberry Pi, and run it in the game backend in place of the threshold rules.
 
-Classes: `idle`, `aiming`, `swing`, `flick`, `bump` (you can add more in the UI), plus a
-**strength** estimate from 0 to 10.
+Classes: `idle`, `aiming`, `swing`, `flick`, `bump`, plus a **strength** estimate from 0 to 10.
 
 ```
-ESP32 --ws:8767--> swatter_ml/server.py (laptop)   record, review, train  ->  models/latest/
+ESP32 --ws:8767--> python -m swatter_ml.record (laptop)   record takes  ->  data/takes/
+python -m swatter_ml.train (laptop)                        train        ->  models/latest/
 ESP32 --ws:8767--> backend/server.py --classifier model (Pi)  ->  "swatter" actions to Unity
 ```
 
@@ -19,49 +18,30 @@ py -3.12 -m venv .venv
 .venv\Scripts\pip install -r swatter_ml/requirements.txt
 ```
 
-TensorFlow 2.18 needs Python 3.9 to 3.12. Only training needs it.
+TensorFlow 2.18 needs Python 3.9 to 3.12. Only training needs it; recording needs only `aiohttp`.
 
-## 1. Record
+## 1. Record (guided terminal screen)
 
 ```powershell
-.venv\Scripts\python -m swatter_ml.server            # then open http://127.0.0.1:8090
+.venv\Scripts\python -m swatter_ml.record --person kevin        # --rounds 2 for two passes
 ```
 
-Pick the source at the top left:
+The ESP32 streams to `ws://<laptop IP>:8767` (set `PI_HOST` in `firmware/src/main.cpp` to the laptop's
+address on the hotspot, and stop the backend, which uses the same port).
 
-| Source | What it is |
-|---|---|
-| **Live swatter** | The ESP32. It must stream to `ws://<laptop IP>:8767` (see the firmware section below). |
-| **Synthetic swatter** | A simulated swatter. While you record, it performs the gesture you picked at the strength you set. Use it to try the tool without hardware. |
-| **Replay file** | A saved take, a folder of takes, or a CSV from `backend/collect.py`, played back at real speed through the same path as live data. |
+The screen shows one prompt at a time, such as **SWING from the RIGHT across to the LEFT, strength 6**.
+Get ready, press `SPACE`, count 3-2-1, and do it; the take is saved and the next prompt appears.
+`S` skips a prompt, `U` deletes the last take (and repeats that prompt), `Q` quits.
 
-Then:
+One round is 26 prompts, shuffled so the labels are mixed:
+- **18 swings:** six directions (right to left, left to right, top to middle, bottom to middle, and the
+  two diagonals) at strengths 3 (gentle), 6 (a normal swat) and 10 (as hard as you can).
+- **8 things that are not swings:** holding still, aiming slowly, a small wrist flick, a bump.
 
-- **Pick a label** with `1`–`9` or a click. Set **strength** with the slider or `[` and `]`. Enter who is swinging.
-- **Record** with `Space`. A countdown runs, then a red band marks the recording on the live plots.
-  - *Single take* records the set number of seconds (1.5 s by default) and saves one take.
-  - *Burst* records for longer (try 20 s) and saves one take per motion peak, cut by the same
-    segmenter the model uses live. For `idle` and `aiming` it cuts a take every 0.5 s instead.
-- **Delete last take** with `Backspace` if a take went wrong.
-- **Review**: click any take to see it, with the model's 0.40 s window shaded and the peak marked.
-  - *Play* animates it. *Play into stream* feeds it through the live path and the model.
-  - You can relabel or delete it (`Delete`).
-- Counts per class show on the label buttons and the takes list.
-
-Takes are saved one JSON file each in `swatter_ml/data/takes/`, which git ignores. Each file
-holds the raw samples, label, strength, person, date, mode, measured sample rate and device.
-The window is cut again at training time, so changing the preprocessing never needs re-recording.
-
-**Getting good data**
-
-- Fix the sensor to the swatter in its final position before recording anything.
-- Mix the labels as you go rather than recording all swings and then all flicks. If you record
-  in blocks, the model can learn how the hand drifted instead of the gesture. Training already
-  adds random rotations to fight this, but mixing is better.
-- Record several people. Then hold one out when training (`--holdout-person`) to see how the
-  model does on someone it has never seen.
-- Aim for at least 30 takes per class. Be generous with `idle` and `aiming`, since they are what
-  the model must *not* call a swing.
+It warns you if a swing barely moved the sensor or if a "hold still" take moved. Fix the sensor to the
+swatter in its final position before the first take, run several rounds, and use more than one person
+if you can. Each take is one JSON file in `swatter_ml/data/takes/` (git-ignored), with the swing's
+direction saved as extra information. Takes from `backend/collect.py` (CSV) also work for training.
 
 ## 2. Train and export
 

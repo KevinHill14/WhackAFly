@@ -20,14 +20,16 @@
 #include <Wire.h>
 #include <Adafruit_LSM6DSOX.h>
 
-// ---- WiFi (phone hotspot) ---------------------------------------------------
-constexpr char WIFI_SSID[] = "SM-G781W0986";
-constexpr char WIFI_PASSWORD[] = "blwt3316";
+// ---- WiFi: the Raspberry Pi is the hotspot (everything joins WhackAFly-AP) --
+constexpr char WIFI_SSID[] = "WhackAFly-AP";
+constexpr char WIFI_PASSWORD[] = "whackafly123";
 // -----------------------------------------------------------------------------
 
 // ---- WebSocket (Raspberry Pi training-data server) --------------------------
-constexpr char PI_HOST[] = "172.20.10.10";
-constexpr uint16_t PI_PORT = 8765;
+// The Pi's address on its own hotspot, and the game backend's swatter stream port (see backend/README.md).
+// To record on the laptop instead, set PI_HOST to the laptop's address on the Pi's hotspot.
+constexpr char PI_HOST[] = "192.168.4.1";
+constexpr uint16_t PI_PORT = 8767;
 constexpr char PI_WS_PATH[] = "/";
 // -----------------------------------------------------------------------------
 
@@ -118,11 +120,15 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
-  while (WiFi.status() != WL_CONNECTED) {
+  // Wait up to 8 s, then carry on without Wi-Fi: the USB serial stream (send 'p') must work even when the
+  // Pi's hotspot is off. The Wi-Fi stack keeps trying in the background.
+  uint32_t wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 8000) {
     delay(500);
     Serial.print(".");
   }
-  Serial.printf("\nWiFi connected, IP address: %s\n", WiFi.localIP().toString().c_str());
+  if (WiFi.status() == WL_CONNECTED) Serial.printf("\nWiFi connected, IP address: %s\n", WiFi.localIP().toString().c_str());
+  else Serial.println("\nNo WiFi yet (continuing; still retrying in the background).");
 
   webSocket.begin(PI_HOST, PI_PORT, PI_WS_PATH);
   webSocket.onEvent(webSocketEvent);
@@ -175,8 +181,9 @@ void loop() {
 
   if (streamRaw) {
     // Format works with the Arduino/PlatformIO serial plotter.
-    Serial.printf("lx:%.2f ly:%.2f lz:%.2f gx:%.2f gy:%.2f gz:%.2f\n",
-                  linear[0], linear[1], linear[2], gyro[0], gyro[1], gyro[2]);
+    // ax/ay/az (raw, gravity included) match what the Wi-Fi stream sends, so USB recordings can train the same model.
+    Serial.printf("lx:%.2f ly:%.2f lz:%.2f gx:%.2f gy:%.2f gz:%.2f ax:%.3f ay:%.3f az:%.3f\n",
+                  linear[0], linear[1], linear[2], gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]);
   }
 
   // Stream every sample to the Pi for training-data collection.

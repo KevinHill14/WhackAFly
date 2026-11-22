@@ -293,10 +293,13 @@ namespace FlyAI
             playTexture = Solid(new Color(0.16f, 0.5f, 0.24f));
             playHover = Solid(new Color(0.22f, 0.64f, 0.31f));
 
-            titleStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = true };
-            bodyStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, richText = true, wordWrap = true };
-            buttonStyle = MakeButton(buttonTexture, buttonHover);
-            playStyle = MakeButton(playTexture, playHover);
+            titleStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = true, font = MenuStyle.UiFont };
+            bodyStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, richText = true, wordWrap = true, font = MenuStyle.UiFont, fontStyle = FontStyle.Bold };
+            // Text sits on a soft rounded panel so it reads over the picture.
+            MenuStyle.Round(bodyStyle, MenuStyle.Rounded(new Color(1f, 0.98f, 0.94f, 0.82f), 12), null, 12);
+            bodyStyle.padding = new RectOffset(14, 14, 5, 5);
+            buttonStyle = MenuStyle.Primary;
+            playStyle = MenuStyle.Go;
             SetColor(titleStyle, Color.white);
             SetColor(bodyStyle, new Color(0.12f, 0.1f, 0.08f));
         }
@@ -403,41 +406,41 @@ namespace FlyAI
             SetColor(titleStyle, Color.white);
         }
 
+        // A short line of text on its own rounded panel, centred.
+        void Pill(string text)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            GUILayout.Label(text, bodyStyle, GUILayout.ExpandWidth(false));
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+        }
+
         void DrawHeader(string subtitle)
         {
             DrawLogo();
-            GUILayout.Label(subtitle, bodyStyle);
+            if (subtitle.Length > 0) Pill(subtitle);
             GUILayout.Space(14f);
         }
 
         void DrawMain(float unit)
         {
-            DrawHeader("A real fruit fly brain is flying this fly.");
+            DrawHeader("");
 
-            var status = GameServices.BrainStatus();
             var online = GameServices.BrainOnline;
-            var bad = status.StartsWith("Stopped") || status.StartsWith("Could not") || status.StartsWith("Switched off");
-            var color = online ? "1B7F3A" : bad ? "B02A20" : "9A6200";
-            GUILayout.Label($"<color=#{color}>●</color>  Fly brain:  {status}", bodyStyle);
-            GUILayout.Space(unit * 0.8f);
-
-            GUILayout.Label("World (LiDAR scan)", bodyStyle);
+            Pill("Current World");
+            GUILayout.Space(unit * 0.2f);
             var levelText = busy ? "Processing...  (click to choose another)" : levelLabel.Length > 0 ? levelLabel : "Choose LiDAR file...";
             if (SlotButton(levelText, buttonStyle, unit * 2.4f, 0.78f)) ChooseFile();
             if (!busy && levelId.Length > 0 && loader != null)
             {
                 var ready = loader.LoadedId == levelId && !loader.IsLoading;
-                GUILayout.Label(ready ? "<color=#1B7F3A>Level ready</color>" : "<color=#9A6200>Getting the level ready in the background...</color>", bodyStyle);
+                Pill(ready ? "<color=#1B7F3A>Level ready</color>" : "<color=#9A6200>Getting the level ready in the background...</color>");
             }
             GUILayout.Space(unit * 0.4f);
             if (SlotButton("Upload from phone", buttonStyle, unit * 2.4f, 0.78f)) OpenUpload();
-            GUILayout.Space(unit * 0.8f);
+            GUILayout.Space(unit * 0.2f);
 
-            GUI.enabled = !busy && levelId.Length > 0 && loader != null;
-            if (SlotButton("PLAY", playStyle, unit * 3.3f, 0.78f)) Play();
-            GUI.enabled = true;
-
-            GUILayout.Space(unit * 0.3f);
             var theme = loader != null ? loader.Theme : ThemeMenu.SavedTheme();
             if (SlotButton($"Theme: {theme.name}", buttonStyle, unit * 2.4f, 0.78f) && loader != null)
             {
@@ -447,10 +450,18 @@ namespace FlyAI
             }
             GUILayout.Space(unit * 0.2f);
             DrawDifficulty(unit);
+            GUILayout.Space(unit * 0.2f);
+            if (SlotButton(LocalScores.Visible ? "Leaderboard: shown" : "Leaderboard", buttonStyle, unit * 2.4f, 0.78f)) LocalScores.Visible = !LocalScores.Visible;
+            GUILayout.Space(unit * 0.4f);
+
+            GUI.enabled = !busy && levelId.Length > 0 && loader != null;
+            if (SlotButton("PLAY", playStyle, unit * 3.3f, 0.78f)) Play();
+            GUI.enabled = true;
+
             GUILayout.Space(unit * 0.3f);
-            if (notice.Length > 0) GUILayout.Label($"<color=#B04A08>{notice}</color>", bodyStyle);
-            else if (levelId.Length == 0) GUILayout.Label("Choose a LiDAR file or upload one from your phone to play.", bodyStyle);
-            else if (!online) GUILayout.Label("The fly brain is not running yet, so the fly will not react until it is.", bodyStyle);
+            if (notice.Length > 0) Pill($"<color=#B04A08>{notice}</color>");
+            else if (levelId.Length == 0) Pill("Choose a LiDAR file or upload one from your phone to play.");
+            else if (!online) Pill("The fly brain is not running yet, so the fly will not react until it is.");
 
             GUILayout.FlexibleSpace();
             if (SlotButton("Quit", buttonStyle, unit * 1.8f, 0.4f)) Quit();
@@ -462,7 +473,7 @@ namespace FlyAI
             var level = Difficulty.Level;
             GUILayout.BeginVertical(GUILayout.Height(unit * 2.4f));
             GUILayout.FlexibleSpace();
-            GUILayout.Label($"Difficulty:  <b>{Difficulty.Names[level]}</b>", bodyStyle);
+            Pill($"Difficulty:  {Difficulty.Names[level]}");
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
             var picked = Mathf.RoundToInt(GUILayout.HorizontalSlider(level, 0f, 2f, GUILayout.Width(columnWidth * 0.6f), GUILayout.Height(unit * 0.9f)));

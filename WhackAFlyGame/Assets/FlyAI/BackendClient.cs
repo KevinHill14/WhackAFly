@@ -38,7 +38,7 @@ namespace FlyAI
     // Set FLYAI_BACKEND (for example ws://192.168.4.1:8766) to override the address.
     public class BackendClient : MonoBehaviour
     {
-        const string DefaultUrl = "ws://127.0.0.1:8766";
+        const string DefaultUrl = "ws://192.168.4.1:8766"; // the Pi hotspot; set FLYAI_BACKEND=ws://127.0.0.1:8766 to test with a local backend
         const float PoseInterval = 0.05f;
 
         public static BackendClient Current { get; private set; }
