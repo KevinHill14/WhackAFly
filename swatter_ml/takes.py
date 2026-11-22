@@ -8,7 +8,7 @@ One take = one labelled gesture = one JSON file in swatter_ml/data/takes/ (git-i
 The raw samples are kept; the window is cut again at training time by features.window_from_rows,
 so changing the preprocessing never needs re-recording.
 
-CSV files from backend/collect.py or pi_server/collect_training_data.py
+CSV files from backend/collect.py
 (timestamp, ax, ay, az, gx, gy, gz, label, trial_id[, person]) load too: one take per trial_id.
 """
 import csv
@@ -31,6 +31,29 @@ def measured_rate(rows):
     if len(rows) < 2 or rows[-1][0] <= rows[0][0]:
         return None
     return round((len(rows) - 1) * 1000.0 / (rows[-1][0] - rows[0][0]), 1)
+
+
+def even_times(rows):
+    """The same samples, evenly spaced from the first time to the last."""
+    if len(rows) < 2:
+        return rows
+    step = (rows[-1][0] - rows[0][0]) / (len(rows) - 1)
+    return [[rows[0][0] + i * step] + list(r[1:]) for i, r in enumerate(rows)]
+
+
+def fix_times(take):
+    """USB delivers samples in bursts, so takes stamped on arrival share timestamps and the resampler would
+    drop most of them. The board samples at a steady rate, so those takes are spaced evenly when loaded.
+    The file on disk is not changed."""
+    rows = take.get("samples") or []
+    if len(rows) > 2 and sum(b[0] <= a[0] for a, b in zip(rows, rows[1:])) > 0.25 * (len(rows) - 1):
+        take["samples"] = even_times(rows)
+    return take
+
+
+def dropout(rows):
+    """True if the sensor stopped answering during this take (its acceleration reads exactly zero)."""
+    return sum(1 for r in rows if r[1] == 0 and r[2] == 0 and r[3] == 0) > 0.02 * max(1, len(rows))
 
 
 def new_id(label):
@@ -124,7 +147,7 @@ def load_all(sources=(TAKES_DIR,)):
             out.append(json.loads(p.read_text()))
         else:
             print(f"not found: {p}")
-    return out
+    return [fix_times(t) for t in out]
 
 
 def summary(take):

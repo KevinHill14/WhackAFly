@@ -201,6 +201,7 @@ namespace FlyAI
         // Called when the round's countdown ends.
         public void OnRoundStart()
         {
+            RollPersonality(); // The level loads behind the menu, so this picks up a difficulty changed after that.
             nextAmbient = Time.time + Random.Range(4f, 8f) / restless;
             cooldownUntil = Time.time + 0.5f;
             client?.Reset(); // A fresh fly: it is not used to anything yet.

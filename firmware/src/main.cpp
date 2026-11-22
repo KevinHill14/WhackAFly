@@ -53,6 +53,14 @@ uint32_t lastSwingMs = 0;
 
 static const char AXIS_NAME[3] = {'X', 'Y', 'Z'};
 
+// Ranges and rates, set at start-up and again if the sensor has to be restarted.
+static void configureImu() {
+  imu.setAccelRange(LSM6DS_ACCEL_RANGE_8_G);
+  imu.setGyroRange(LSM6DS_GYRO_RANGE_1000_DPS);
+  imu.setAccelDataRate(LSM6DS_RATE_208_HZ);
+  imu.setGyroDataRate(LSM6DS_RATE_208_HZ);
+}
+
 static void readSensor(float accel[3], float gyro[3]) {
   sensors_event_t a, g, t;
   imu.getEvent(&a, &g, &t);
@@ -144,10 +152,7 @@ void setup() {
   }
   Serial.println("LSM6DSOX found.");
 
-  imu.setAccelRange(LSM6DS_ACCEL_RANGE_8_G);
-  imu.setGyroRange(LSM6DS_GYRO_RANGE_1000_DPS);
-  imu.setAccelDataRate(LSM6DS_RATE_208_HZ);
-  imu.setGyroDataRate(LSM6DS_RATE_208_HZ);
+  configureImu();
 
   calibrate();
 }
@@ -170,6 +175,22 @@ void loop() {
 
   float accel[3], gyro[3];
   readSensor(accel, gyro);
+
+  // A hard swing can drop the I2C link, and the sensor then reads exactly zero until it is restarted.
+  // Those readings are never sent, and the link is restarted (the calibration is kept).
+  static uint8_t zeroReads = 0;
+  if (accel[0] == 0 && accel[1] == 0 && accel[2] == 0) {
+    if (++zeroReads >= 10) {
+      zeroReads = 0;
+      Serial.println("Sensor stopped answering, restarting I2C.");
+      Wire.end();
+      Wire.begin();
+      Wire.setClock(400000);
+      if (imu.begin_I2C(0x6A) || imu.begin_I2C(0x6B)) configureImu();
+    }
+    return;
+  }
+  zeroReads = 0;
 
   // Remove gyro bias, and strip gravity so only motion remains.
   float linear[3];

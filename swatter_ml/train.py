@@ -171,6 +171,10 @@ def main():
 def run(a):
     rng = random.Random(a.seed)
     takes = [t for t in T.load_all(a.data) if t.get("label") and t.get("samples")]
+    bad = [t for t in takes if T.dropout(t["samples"])]
+    if bad:     # Left on disk, just not trained on.
+        print(f"skipping {len(bad)} takes where the sensor dropped out: {', '.join(str(t.get('id')) for t in bad)}")
+        takes = [t for t in takes if not T.dropout(t["samples"])]
     print(f"{len(takes)} takes from {', '.join(a.data)}")
     if len(takes) < a.min_takes:
         raise SystemExit(f"need at least {a.min_takes} takes to train (have {len(takes)})")

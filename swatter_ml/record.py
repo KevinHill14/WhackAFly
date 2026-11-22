@@ -403,6 +403,12 @@ async def run(args):
                 await asyncio.sleep(0.05)
             stream.recording = False
             rows, stream.rows = stream.rows, []
+            if T.dropout(rows):
+                message = (f"{RED}The sensor stopped answering, so this take was NOT saved. Check the wires "
+                           f"(SDA, SCL, 3V3, GND), then do it again.{RESET}")
+                continue
+            if usb:
+                rows = T.even_times(rows)      # USB arrives in bursts; the board samples at a steady rate
             warning = check(item["label"], rows)
             rate = len(rows) / args.seconds
             if len(rows) >= 50 and rate < 120:

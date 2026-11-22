@@ -41,7 +41,7 @@ namespace FlyAI
             {
                 if (e.evt != "swing") continue;
                 frame.swing = true;
-                frame.swingStrength = Mathf.Lerp(0.4f, 1f, Mathf.InverseLerp(MinRate, FullRate, e.rate));
+                frame.swingStrength = Mathf.Lerp(0.4f, 1f, e.strength > 0f ? Mathf.Clamp01(e.strength) : Mathf.InverseLerp(MinRate, FullRate, e.rate));
                 frame.swingStroke = ImuSwatter.StrokeFor(e.axis, e.dir, frame.swingStrength);
             }
             return frame;

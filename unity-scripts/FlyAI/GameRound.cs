@@ -50,6 +50,7 @@ namespace FlyAI
         float timeTaken;
         int lastStep = -1;
         int swings;
+        bool saveRun;
         GUIStyle bigStyle;
         GUIStyle midStyle;
         GUIStyle smallStyle;
@@ -81,6 +82,14 @@ namespace FlyAI
 
         void OnSwung(SwingResult result) => swings++;
 
+        void SaveRun()
+        {
+            saveRun = false;
+            var bill = player != null ? player.DamageBill : 0;
+            LocalScores.Add(timeTaken, Difficulty.Level, bill, swings, FindFirstObjectByType<RoomLoader>()?.ThemeName);
+            Leaderboard.FlySwatted(bill, timeTaken);
+        }
+
         void Update()
         {
             if (player == null)
@@ -88,6 +97,7 @@ namespace FlyAI
                 player = FindFirstObjectByType<PlayerController>();
                 if (player != null) player.Swung += OnSwung;
             }
+            if (saveRun) SaveRun();
 
             switch (CurrentPhase)
             {
@@ -128,9 +138,7 @@ namespace FlyAI
         {
             if (CurrentPhase != Phase.Playing) return;
             timeTaken = RoundSeconds - timeLeft;
-            var bill = player != null ? player.DamageBill : 0;
-            LocalScores.Add(timeTaken, Difficulty.Level, bill, swings, FindFirstObjectByType<RoomLoader>()?.ThemeName);
-            Leaderboard.FlySwatted(bill, timeTaken);
+            saveRun = true; // Next frame, so the swing that killed the fly is counted too.
             End(Phase.Won);
             Say("announce_smushed");
             if (player != null) player.AddPopup(point, "SMUSHED!", new Color(0.3f, 1f, 0.35f), 40);
