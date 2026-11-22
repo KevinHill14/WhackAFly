@@ -411,7 +411,8 @@ namespace FlyAI
             if (stroke.sqrMagnitude > 0.0001f)
             {
                 direction = SweepArc(aim, stroke, sweptDirections);
-                threatDirection = aim * Quaternion.Euler(-stroke.y * 0.5f, stroke.x * 0.5f, 0f) * Vector3.forward;
+                // Halfway along the part of the arc the swatter really swept (it can stop early on furniture).
+                threatDirection = Vector3.Slerp(aim * Vector3.forward, direction, 0.5f);
             }
             FlyAgent.Current?.OnSwing(head.position, threatDirection, swatRadius, swatReach, strength);
             BackendClient.SendSwing(head.position, direction, strength, swatReach, sweptDirections);
