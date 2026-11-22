@@ -26,6 +26,7 @@ namespace FlyAI
         const float BodyRadius = 0.25f;
         const float MaxAimYaw = 28f;
         const float MaxAimPitch = 84f;
+        const float PitchPull = 6f;   // per second: how fast the aim settles on the swatter's tilt
         const float ViewPitchShare = 0.65f;
         const float SwingDuration = 0.18f;
         const float SwingCooldown = 0.35f;
@@ -270,6 +271,7 @@ namespace FlyAI
             if (!captured && !(input is ImuSwatter && ImuReceiver.IsLive && !finished)) // The sensor does not need the mouse captured.
             {
                 frame.aimDelta = Vector2.zero;
+                frame.hasPitch = false;
                 frame.swing = false;
                 frame.recenter = false;
             }
@@ -294,7 +296,10 @@ namespace FlyAI
                 message = "Aim recentered";
             }
             aimYaw = Mathf.Clamp(aimYaw + frame.aimDelta.x, -MaxAimYaw, MaxAimYaw);
-            aimPitch = Mathf.Clamp(aimPitch + frame.aimDelta.y, -MaxAimPitch, MaxAimPitch);
+            aimPitch += frame.aimDelta.y;
+            // The swatter's tilt sets up-down: the gyro gives the speed, gravity pulls it to the true angle so it never drifts.
+            if (frame.hasPitch) aimPitch = Mathf.Lerp(aimPitch, frame.pitch, 1f - Mathf.Exp(-PitchPull * Time.deltaTime));
+            aimPitch = Mathf.Clamp(aimPitch, -MaxAimPitch, MaxAimPitch);
             ApplyAim();
             RecordAim();
 

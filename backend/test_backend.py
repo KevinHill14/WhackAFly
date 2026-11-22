@@ -17,6 +17,13 @@ def check(ok, what):
 
 SPOTS = [{"id": f"s{i}", "position": [i * 0.8, 1.0, 2.0], "normal": [0, 1, 0]} for i in range(6)]
 
+def unpack(m):
+    """The server sends one "tick" per frame holding the fly, controller, brain and events; tests look at the parts."""
+    if m.get("type") != "tick":
+        return [m]
+    return [m[k] for k in ("fly", "ctl", "brain") if k in m] + m.get("events", [])
+
+
 def unit_tests():
     print("game logic")
     g = FlyGame(random.Random(1)); g.set_room(SPOTS, [0, 1.6, 0])
@@ -157,7 +164,8 @@ async def end_to_end():
         q = asyncio.Queue()
         async def pump():
             try:
-                while True: await q.put(json.loads(await sock.recv()))
+                while True:
+                    for part in unpack(json.loads(await sock.recv())): await q.put(part)
             except ws.ConnectionClosed: pass
         pump_task = asyncio.ensure_future(pump())
         hello = await asyncio.wait_for(q.get(), 3); check(hello["type"] == "hello", "server says hello")
@@ -227,7 +235,8 @@ async def e2e_rounds():
         q = asyncio.Queue()
         async def pump():
             try:
-                while True: await q.put(json.loads(await sock.recv()))
+                while True:
+                    for part in unpack(json.loads(await sock.recv())): await q.put(part)
             except ws.ConnectionClosed: pass
         task = asyncio.ensure_future(pump())
         async def until(pred, secs):
@@ -292,7 +301,8 @@ async def e2e_swatter():
         q = asyncio.Queue()
         async def pump():
             try:
-                while True: await q.put(json.loads(await unity.recv()))
+                while True:
+                    for part in unpack(json.loads(await unity.recv())): await q.put(part)
             except ws.ConnectionClosed: pass
         task = asyncio.ensure_future(pump())
         async def until(pred, secs):

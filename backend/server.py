@@ -4,7 +4,9 @@
   ESP32 swatter  --udp:9000->  this server
 
 Unity sends room landing spots, the player's pose and swings. This server runs
-the fly, asks the brain how it escapes, and streams the fly state back at 30 Hz.
+the fly, asks the brain how it escapes, and streams the state back at 30 Hz as one
+"tick" message: the fly, the swatter's aim and thumbstick, the newest brain output and
+any events. One packet per tick, because the Pi's Wi-Fi falls behind on many small ones.
 See backend/README.md for the protocol.
 """
 import argparse
@@ -12,21 +14,32 @@ import asyncio
 import json
 import math
 import os
+import socket
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ws  # noqa: E402  (brain/ws.py, stdlib WebSocket)
 import qnx  # noqa: E402  (QNX scheduling, slog2 logging, timing)
+import flytrace as trace  # noqa: E402  (brain/flytrace.py, FLYAI_TRACE=1 delay hunting)
 from gesture import ControllerState, ThresholdClassifier, make_classifier, parse_controller, parse_sample  # noqa: E402
 from game import TICK_HZ, SWAT_REACH  # noqa: E402
 from fly import AdvancedGame  # noqa: E402
 
 LOOMING_HZ = 20
-CONTROLLER_HZ = 60
 MAX_CLIENT_BACKLOG = 32 * 1024   # bytes queued for one Unity client, about a second of messages
+# Old positions are worthless, so when Wi-Fi falls behind a tick is skipped rather than queued. A small kernel send
+# buffer makes the backlog show up here (instead of seconds of it hiding in the network stack), and more than
+# STALE_BACKLOG still unsent means the previous tick has not gone out yet.
+CLIENT_SNDBUF = 4096
+STALE_BACKLOG = 2048
+# Unity reports the number of the last message it received ("ack"). A message still unacknowledged after this long
+# means Wi-Fi is behind wherever the bytes are queued (kernel, driver, the phone), so ticks are skipped until it
+# catches up. A healthy link acks in about 100 ms (the trip, plus Unity acking every 50 ms).
+MAX_UNACKED_MS = 250
 
 
 class Backend:
@@ -50,54 +63,100 @@ class Backend:
         self.brain_rtt = qnx.Latency()         # looming request to escape reply, ms
         self.sent_at = {}                      # looming request id -> send time
         self.next_id = 0
+        self.out_seq = 0                       # numbers every message to Unity
+        self.acked = 0                         # the newest of them Unity says it has
+        self.ack_from = 0                      # out_seq when Unity connected: acks count only above it
+        self.unacked = deque()                 # (seq, monotonic ms) of messages Unity has not acknowledged
+        self.brain_out = None                  # newest brain decision, not yet sent to Unity
+        self.pending_events = []               # events waiting for the next tick that goes out
+        self.skipped = 0                       # ticks skipped because Unity's link was behind
 
     async def send_all(self, msg):
-        await self.send_text(json.dumps(msg, separators=(",", ":")))
+        if self.clients:
+            self.out_seq += 1
+            msg = {**msg, "seq": self.out_seq}                         # Unity acks it
+            self.unacked.append((self.out_seq, qnx.now_ms()))
+            if len(self.unacked) > 1000:                               # a Unity build that never acks
+                self.unacked.popleft()
+            if trace.ON:
+                msg["pt"] = round(trace.now_ms(), 1)                   # so Unity can time the trip
+        await self.send_text(json.dumps(msg, separators=(",", ":")), msg.get("type", "?"))
 
-    async def send_text(self, text):
+    async def send_text(self, text, kind="?"):
         clients = list(self.clients)
         if len(clients) == 1:
-            await self.send_one(clients[0], text)
+            await self.send_one(clients[0], text, kind)
         elif clients:
-            await asyncio.gather(*(self.send_one(c, text) for c in clients))   # A slow client delays nobody else's send.
+            await asyncio.gather(*(self.send_one(c, text, kind) for c in clients))   # A slow client delays nobody else's send.
 
-    async def send_one(self, client, text):
+    async def send_one(self, client, text, kind="?"):
         # Too much unsent data means this client stopped reading: drop it at once instead of waiting on it.
-        if client.writer.transport.get_write_buffer_size() > MAX_CLIENT_BACKLOG:
+        backlog = client.writer.transport.get_write_buffer_size()
+        if backlog > MAX_CLIENT_BACKLOG:
+            trace.event(f"TX-DROP {kind} backlog={backlog}B: Unity stopped reading, dropping it")
             self.clients.discard(client)
             client.abort()
             return
+        t0 = trace.now_ms() if trace.ON else 0
         try:
             await asyncio.wait_for(client.send(text), 0.25)
-        except (ws.ConnectionClosed, asyncio.TimeoutError, OSError):
+        except (ws.ConnectionClosed, asyncio.TimeoutError, OSError) as e:
+            trace.event(f"TX-FAIL {kind} {e!r} after {trace.now_ms() - t0:.1f}ms backlog={backlog}B")
             self.clients.discard(client)
             client.abort()
+            return
+        if trace.ON:
+            took = trace.now_ms() - t0
+            after = client.writer.transport.get_write_buffer_size()
+            trace.count(f"tx_{kind}", len(text))
+            trace.peak("tx_backlog_B", after)
+            trace.peak("tx_send_ms", took)
+            trace.event(f"TX {kind} {len(text)}B send={took:.1f}ms backlog={after}B {trace.short(text, 140)}")
 
     # ---- Unity connection ----------------------------------------------
     async def on_client(self, sock, path):
+        try:
+            sock.writer.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CLIENT_SNDBUF)
+        except (AttributeError, OSError) as e:
+            qnx.log(qnx.SLOG_WARNING, f"could not shrink the send buffer: {e!r}")
         self.clients.add(sock)
+        self.acked = self.ack_from = self.out_seq
+        self.unacked.clear()
         qnx.log(qnx.SLOG_INFO, f"Unity connected from {sock.peer}")
         await sock.send(json.dumps({"type": "hello", "tick_hz": TICK_HZ,
                                     "brain": self.brain is not None}))
         if self.brain_groups:
             await sock.send(self.brain_groups)
+        trace.event(f"UNITY-CONNECT {sock.peer} clients={len(self.clients)}")
         try:
             while True:
                 raw = await sock.recv()       # Outside the try: a failed connection is not a bad message.
                 try:
                     msg = json.loads(raw)
+                    if trace.ON and isinstance(msg, dict):
+                        kind = msg.get("type", "?")
+                        trace.count(f"rx_{kind}", len(raw))
+                        # The room is many KB of spots; its size is enough.
+                        trace.event(f"RX {kind} {len(raw)}B " + ("" if kind == "room" else trace.short(raw)))
+                    ack = msg.get("ack") if isinstance(msg, dict) else None
+                    if isinstance(ack, int) and not isinstance(ack, bool) and self.acked < ack <= self.out_seq:
+                        self.acked = ack
                     if isinstance(msg, dict):
+                        t0 = trace.now_ms() if trace.ON else 0
                         await self.handle(msg)
+                        if trace.ON:
+                            trace.peak("rx_handle_ms", trace.now_ms() - t0)
                 except json.JSONDecodeError:
                     continue
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     print(f"[backend] ignored bad message: {e!r}")
-        except ws.ConnectionClosed:
-            pass
+        except ws.ConnectionClosed as e:
+            trace.event(f"UNITY-CLOSED {e!r}")
         finally:
             self.clients.discard(sock)
             sock.abort()
             qnx.log(qnx.SLOG_INFO, "Unity disconnected")
+            trace.event(f"UNITY-DISCONNECT clients={len(self.clients)}")
 
     async def send_brain(self, msg, track=False):
         """Send to the brain if connected. `track` gives it an id so the round trip is timed."""
@@ -174,6 +233,8 @@ class Backend:
                 await self.send_brain({"type": "habituation", "enabled": m["enabled"]})
         elif t == "ping":
             await self.send_all({"type": "pong"})
+        elif t == "tping":                                   # trace clock sync: Unity times the round trip
+            await self.send_all({"type": "tpong", "ut": m.get("ut")})
         elif t == "stats":
             await self.send_all(self.stats())
 
@@ -197,6 +258,8 @@ class Backend:
         """The swatter streams IMU samples here; each one goes through the classifier."""
         self.esp_clients += 1
         qnx.log(qnx.SLOG_INFO, f"swatter connected from {sock.peer}")
+        trace.event(f"ESP-CONNECT {sock.peer}")
+        last_arrival, last_t = None, None
         try:
             while True:
                 raw = await sock.recv()
@@ -205,17 +268,35 @@ class Backend:
                     t, accel, gyro = parse_sample(sample)
                 except (ValueError, TypeError, RecursionError):
                     self.esp_bad += 1                # a bad sample is dropped, never fatal
+                    trace.event(f"ESP-BAD {trace.short(str(raw), 80)}")
                     continue
+                if trace.ON:
+                    # A gap then a burst means Wi-Fi held samples back; the board's own clock (t) shows when they were taken.
+                    arrival = trace.now_ms()
+                    trace.count("esp_sample", len(raw))
+                    if last_arrival is not None:
+                        gap = arrival - last_arrival
+                        trace.peak("esp_gap_ms", gap)
+                        if gap > 30:
+                            board_gap = (t - last_t) if (t is not None and last_t is not None) else -1
+                            trace.event(f"ESP-GAP {gap:.0f}ms (board clock {board_gap:.0f}ms) {trace.short(str(raw), 120)}")
+                    last_arrival, last_t = arrival, t
                 self.esp_last = time.monotonic()
                 self.esp_count += 1
-                self.controller.update(t if t is not None else qnx.now_ms(), gyro, *parse_controller(sample))
-                for action in self.classifier.update(t if t is not None else qnx.now_ms(), accel, gyro):
+                self.controller.update(t if t is not None else qnx.now_ms(), gyro, *parse_controller(sample), accel=accel)
+                t0 = trace.now_ms() if trace.ON else 0
+                actions = list(self.classifier.update(t if t is not None else qnx.now_ms(), accel, gyro))
+                if trace.ON:
+                    trace.peak("classifier_ms", trace.now_ms() - t0)
+                for action in actions:
+                    trace.event(f"SWATTER-ACTION {action}")
                     await self.send_all({"type": "swatter", **action})
-        except ws.ConnectionClosed:
-            pass
+        except ws.ConnectionClosed as e:
+            trace.event(f"ESP-CLOSED {e!r}")
         finally:
             self.esp_clients -= 1
             qnx.log(qnx.SLOG_INFO, "swatter disconnected")
+            trace.event("ESP-DISCONNECT")
 
     async def link_loop(self):
         """Watchdog for the swatter: no samples for half a second means the link is lost."""
@@ -237,17 +318,8 @@ class Backend:
                     self.classifier.reset()          # the gravity estimate is stale after a gap
                     self.controller.reset()
                 self.esp_link = state
+                trace.event(f"ESP-LINK {state} ({self.esp_hz:.0f} samples/s)")
                 await self.send_all({"type": "event", "kind": "swatter_link", "state": state})
-
-    async def controller_loop(self):
-        """Aim, thumbstick and press go to Unity 60 times a second while the swatter is connected."""
-        while True:
-            await asyncio.sleep(1 / CONTROLLER_HZ)
-            if self.esp_link == "ok" and self.clients:
-                try:
-                    await self.send_all(self.controller.take())
-                except Exception as e:
-                    qnx.log(qnx.SLOG_ERROR, f"controller loop error: {e!r}", every=5, key="controller-error")
 
     # ---- ESP32 over UDP -------------------------------------------------
     def udp_protocol(self):
@@ -275,7 +347,18 @@ class Backend:
                 qnx.log(qnx.SLOG_INFO, f"brain connected at {self.brain_url}")
                 await self.send_brain({"type": "status"})
                 while True:
-                    m = json.loads(await sock.recv())
+                    raw = await sock.recv()
+                    m = json.loads(raw)
+                    if trace.ON and isinstance(m, dict):
+                        kind = m.get("type", "?")
+                        trace.count(f"brain_rx_{kind}", len(raw))
+                        if kind == "escape":
+                            sent = self.sent_at.get(m.get("id"))
+                            trace.event(f"BRAIN-RX escape id={m.get('id')} {len(raw)}B "
+                                        f"rtt={(trace.now_ms() - sent) if sent else -1:.1f}ms strength={m.get('strength')} "
+                                        f"side={m.get('side')} spikes={len(m.get('spikes') or [])} active={len(m.get('active') or [])}")
+                        else:
+                            trace.event(f"BRAIN-RX {kind} {len(raw)}B")
                     if isinstance(m, dict) and m.get("type") in ("status", "mode_ok"):
                         was = self.brain_status.get("source")
                         self.brain_status = {k: m.get(k) for k in ("mode", "source", "live_available", "live_healthy", "switches") if k in m}
@@ -299,8 +382,9 @@ class Backend:
                                 qnx.log(qnx.SLOG_WARNING, f"slow brain reply: {rtt:.0f} ms", every=5, key="slow-brain")
                         self.game.spikes = m.get("spikes")
                         self.game.on_escape(float(m.get("strength", 0.0)), m.get("side", "right"))
-                        await self.send_all({"type": "brain", "strength": m.get("strength", 0.0), "side": m.get("side", "right"),
-                                             "spikes": m.get("spikes") or [], "active": m.get("active") or []})
+                        # Goes out with the next tick; a newer decision replaces one not yet sent.
+                        self.brain_out = {"type": "brain", "strength": m.get("strength", 0.0), "side": m.get("side", "right"),
+                                          "spikes": m.get("spikes") or [], "active": m.get("active") or []}
             except Exception as e:      # a brain problem must never stop the game
                 if not isinstance(e, (ws.ConnectionClosed, ConnectionError, OSError, asyncio.TimeoutError)):
                     qnx.log(qnx.SLOG_ERROR, f"brain error: {e!r}", every=5, key="brain-error")
@@ -322,14 +406,22 @@ class Backend:
             try:
                 value, side = self.game.looming()
                 ext = self.ext_looming
+                origin = "pi"
                 if ext is not None and time.monotonic() - ext[2] < 0.3 and self.game.active():
                     value, side = ext[0], ext[1]               # Unity's senses win while they keep arriving
+                    origin = "unity"
                 if n % (LOOMING_HZ * 2) == 0:                  # refresh live/fallback status every 2 s
                     await self.send_brain({"type": "status"})
                 if self.brain is not None:
                     loud, ear = self.game.sound()                # sent together, so the brain makes one decision
                     await self.send_brain({"type": "sound", "value": loud, "side": ear})
                     await self.send_brain({"type": "looming", "value": value, "side": side}, track=True)
+                    if trace.ON:
+                        # What the fly perceives this step, and from what: the light Unity reported feeds `vision` here.
+                        senses = {k: round(float(v), 3) for k, v in self.game.senses.items() if isinstance(v, (int, float))}
+                        trace.count("brain_tx_looming")
+                        trace.event(f"BRAIN-TX id={self.next_id} looming={value:.3f} side={side} from={origin} "
+                                    f"cause={self.game.source} sound={loud:.3f}/{ear} senses={senses}")
                 elif value > 0.6:
                     # No brain: crude fallback so the game still plays.
                     self.game.on_escape(min(1.0, value), "left" if side == "right" else "right")
@@ -344,24 +436,74 @@ class Backend:
         while True:
             nxt += period
             try:
+                t0 = trace.now_ms() if trace.ON else 0
                 self.game.tick(period)
+                if trace.ON:
+                    trace.peak("fly_tick_ms", trace.now_ms() - t0)
+                self.pending_events.extend({"type": "event", **e} for e in self.game.events)
+                self.game.events.clear()
                 if self.clients:
-                    snap = self.game.snapshot()
-                    snap["brain"] = self.brain_status.get("source")        # "live", "fallback" or None
-                    snap["swatter"] = self.esp_link                        # "never", "ok" or "lost"
-                    snap["classifier"] = self.classifier.name
-                    await self.send_all(snap)
-                    for e in self.game.events:
-                        await self.send_all({"type": "event", **e})
+                    await self.send_tick()
+                else:
+                    self.pending_events.clear()
             except Exception as e:
                 qnx.log(qnx.SLOG_ERROR, f"tick error: {e!r}", every=5, key="tick-error")
-            self.game.events.clear()
             await asyncio.sleep(max(0.0, nxt - time.monotonic()))
             late_ms = (time.monotonic() - nxt) * 1000
             self.tick_lateness.add(max(0.0, late_ms))
+            if trace.ON:
+                trace.peak("tick_late_ms", late_ms)
+                if late_ms > 15:
+                    trace.event(f"LATE fly tick {late_ms:.0f}ms")
             if late_ms > 1.5 * period * 1000:                   # missed a deadline by half a period
                 qnx.log(qnx.SLOG_WARNING, f"fly tick {late_ms:.0f} ms late", every=5, key="late-tick")
                 nxt = time.monotonic()
+
+    async def send_tick(self):
+        """Everything Unity needs this tick, in one message. Skipped while the previous one is still unsent: events
+        wait for the next tick, the aim keeps adding up, and only stale positions are lost."""
+        backlog = max(c.writer.transport.get_write_buffer_size() for c in self.clients)
+        while self.unacked and self.unacked[0][0] <= self.acked:
+            self.unacked.popleft()
+        # How long the oldest message has gone unacknowledged; 0 until Unity acks at all (older builds never do).
+        waiting = qnx.now_ms() - self.unacked[0][1] if self.unacked and self.acked > self.ack_from else 0.0
+        trace.peak("unacked_ms", waiting)
+        if (backlog > STALE_BACKLOG or waiting > MAX_UNACKED_MS) and not self.pending_events:
+            self.skipped += 1
+            trace.count("tick_skipped")
+            trace.event(f"SKIP tick: {backlog}B unsent, oldest unacknowledged {waiting:.0f}ms")
+            return
+        snap = self.game.snapshot()
+        snap["brain"] = self.brain_status.get("source")        # "live", "fallback" or None
+        snap["swatter"] = self.esp_link                        # "never", "ok" or "lost"
+        snap["classifier"] = self.classifier.name
+        tick = {"type": "tick", "fly": snap}
+        if self.esp_link == "ok":
+            tick["ctl"] = self.controller.take()
+        if self.brain_out is not None:
+            tick["brain"], self.brain_out = self.brain_out, None
+        if self.pending_events:
+            tick["events"], self.pending_events = self.pending_events, []
+        await self.send_all(tick)
+
+    async def trace_loop(self):
+        """FLYAI_TRACE only. Every 5 ms it checks how late it woke: a long late wake means something held the whole
+        event loop (every message waits behind it). Once a second it writes the summary."""
+        step, second = 0.005, time.monotonic() + 1.0
+        while True:
+            t0 = time.monotonic()
+            await asyncio.sleep(step)
+            stall = (time.monotonic() - t0 - step) * 1000
+            trace.peak("loop_stall_ms", stall)
+            if stall > 25:
+                trace.event(f"STALL event loop held {stall:.0f}ms")
+            if time.monotonic() >= second:
+                second += 1.0
+                backlogs = [c.writer.transport.get_write_buffer_size() for c in list(self.clients)]
+                trace.flush_second(f"unity={len(self.clients)} backlog={backlogs} swatter={self.esp_link} "
+                                   f"{self.esp_hz:.0f}/s brain={'up' if self.brain else 'down'} "
+                                   f"phase={self.game.phase} fly={self.game.state} looming={self.game.loom:.2f} "
+                                   f"cause={self.game.source} senses={ {k: round(float(v), 2) for k, v in self.game.senses.items() if isinstance(v, (int, float))} }")
 
 
 async def main():
@@ -383,12 +525,18 @@ async def main():
     b.classifier, why = make_classifier(a.classifier, a.model)
     qnx.log(qnx.SLOG_WARNING if why else qnx.SLOG_NOTICE, why or f"swing classifier: {b.classifier.name}")
     b.qnx_info = qnx.startup(a.rt_priority)
+    where = trace.start("backend")
+    if where:
+        qnx.log(qnx.SLOG_NOTICE, f"trace on: {where}")
     await ws.serve(b.on_client, a.host, a.port)
     await ws.serve(b.on_esp32, a.host, a.esp_port)
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(b.udp_protocol, local_addr=(a.host, a.udp_port))
     qnx.log(qnx.SLOG_NOTICE, f"listening: Unity ws://{a.host}:{a.port}  ESP32 stream ws://{a.host}:{a.esp_port}  ESP32 events udp://{a.host}:{a.udp_port}  brain {a.brain}")
-    await asyncio.gather(b.brain_loop(), b.looming_loop(), b.tick_loop(), b.link_loop(), b.controller_loop())
+    loops = [b.brain_loop(), b.looming_loop(), b.tick_loop(), b.link_loop()]
+    if trace.ON:
+        loops.append(b.trace_loop())
+    await asyncio.gather(*loops)
 
 
 if __name__ == "__main__":

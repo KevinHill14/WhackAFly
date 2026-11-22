@@ -54,6 +54,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import ws  # noqa: E402
+import flytrace as trace  # noqa: E402  (FLYAI_TRACE=1 delay hunting)
 
 SIDES = ("left", "right", "center")
 MODES = ("live", "fallback", "auto")
@@ -123,12 +124,15 @@ class BrainWorker(threading.Thread):
         self.last_decide_t = None
 
     def submit(self, key, job, deliver):
+        if trace.ON:
+            job["_queued"] = trace.now_ms()
         with self.cond:
             old = self.pending.pop(key, None)
             self.pending[key] = (job, deliver)
             self.cond.notify()
         if old:
             self.coalesced += 1
+            trace.count("superseded")
             old[1](SUPERSEDED)
 
     def drop(self, key):
@@ -196,6 +200,15 @@ class BrainWorker(threading.Thread):
                     dt = time.perf_counter() - t0
                     self.last_ms = dt * 1000
                     self.recent.append(dt)
+                    if trace.ON:
+                        started = trace.now_ms() - dt * 1000
+                        waited = started - job.get("_queued", started)    # submitted -> the worker picked it up
+                        trace.count("decision")
+                        trace.peak("decide_ms", dt * 1000)
+                        trace.peak("queue_wait_ms", waited)
+                        trace.event(f"DECIDE looming={job['looming']:.3f}/{job['side']} sound={job['sound']:.3f}/{job['sound_side']} "
+                                    f"-> strength={r['strength']:.3f} {r['side']} spikes={len(r['spikes'] or [])} "
+                                    f"active={len(r.get('active') or [])} step={dt * 1000:.1f}ms queued={waited:.1f}ms")
             except Exception as e:  # never let one bad step kill the thread
                 log("brain error:", repr(e))
                 out = {"type": "error", "error": f"brain: {e}"}
@@ -393,6 +406,7 @@ class BrainServer:
     def _deadline(self, req):
         if req.answered:
             return
+        trace.event(f"DEADLINE missed: no live answer in {self.timeout_s * 1000:.0f} ms, fallback answers")
         self._miss(f"no answer in {self.timeout_s * 1000:.0f} ms")
         if self.fallback:
             self._send(req, self._fallback_reply(req))
@@ -411,6 +425,7 @@ class BrainServer:
             prev.answered = True
             req.t0 = prev.t0
             self.merged += 1
+            trace.count("merged")
         elif self.gather_s > 0:
             # Two stages: when the timer fires, a message whose bytes have
             # already arrived may not be parsed yet (that takes another loop
@@ -476,7 +491,11 @@ class BrainServer:
         async def sender():
             while True:
                 msg = await outbox.get()
-                await sock.send(json.dumps(msg, separators=(",", ":")))
+                text = json.dumps(msg, separators=(",", ":"))
+                await sock.send(text)
+                if trace.ON:
+                    trace.count(f"tx_{msg.get('type', '?')}", len(text))
+                    trace.peak("outbox_len", outbox.qsize())
 
         send_task = asyncio.ensure_future(sender())
         try:
@@ -515,6 +534,7 @@ class BrainServer:
         t = msg.get("type")
         rid = msg.get("id")
         tag = {"id": rid} if "id" in msg else {}
+        trace.count(f"rx_{t}", len(raw))
         if t in ("looming", "sound"):
             parsed = parse_sense(msg)
             if isinstance(parsed, str):
@@ -637,6 +657,18 @@ async def amain(args):
         srv.worker.start()
     log(f"mode {srv.mode}, answering from {srv.source()}")
     tasks = []
+    where = trace.start("brain")
+    if where:
+        log(f"trace on: {where} (spin {args.spin_ms} ms)")
+
+        async def trace_summary():
+            while True:
+                await asyncio.sleep(1.0)
+                w = srv.worker
+                trace.flush_second(f"source={srv.source()} clients={srv.clients} "
+                                   f"pending={len(w.pending) if w else 0} decisions={w.decisions if w else 0} "
+                                   f"misses={srv.live_misses} fallback_replies={srv.fallback_replies}")
+        tasks.append(asyncio.ensure_future(trace_summary()))
     if not args.no_listen:
         server = await ws.serve(srv.handle, args.host, args.port)
         log(f"listening on ws://{args.host}:{args.port}")

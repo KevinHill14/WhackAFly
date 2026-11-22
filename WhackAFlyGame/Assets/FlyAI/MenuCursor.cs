@@ -56,7 +56,7 @@ namespace FlyAI
                 ImuReceiver.TakePress();
                 return;
             }
-            var y = ImuReceiver.LiveStick.y * ImuSwatter.StickForwardSign;
+            var y = ImuSwatter.StickForward(ImuReceiver.LiveStick);
             var direction = y > PushAt ? -1 : y < -PushAt ? 1 : 0;   // Up the screen is toward the first item.
             if (direction == 0)
             {

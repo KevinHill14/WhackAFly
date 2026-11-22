@@ -476,12 +476,20 @@ namespace FlyAI
         {
             if (Time.unscaledTime < nextSenses) return;
             nextSenses = Time.unscaledTime + 0.05f;
+            var traceStart = NetTrace.NowMs;
             var position = transform.position;
             var swatterPosition = player.SwatterTransform.position;
             var beam = FlashlightAt(position);
             flashlightOnFly = beam;
             lightLevel = RoomLightAt(position) + beam;
             vision = Mathf.Clamp01(Mathf.Max(lightLevel * 0.8f, RoomLightAt(swatterPosition)) / FullVisionLight);
+            if (NetTrace.On)
+            {
+                // The light sums cast a ray from every lamp, twice: their cost and what they add up to.
+                var rigs = RoomAtmosphere.Current != null ? RoomAtmosphere.Current.Rigs.Count : 0;
+                NetTrace.Peak("senses_ms", NetTrace.NowMs - traceStart);
+                NetTrace.Event($"SENSES lamps={rigs} light={lightLevel:0.00} beam={beam:0.00} vision={vision:0.00} took={NetTrace.NowMs - traceStart:0.00}ms");
+            }
             var events = RoomEvents.Current;
             BackendClient.SendSenses(vision, beam, events != null ? events.Surge : 0f, events != null ? events.LightningLevel : 0f,
                 events != null ? events.HeadlightLevel : 0f, events != null ? events.Power : 1f, player.Sneaking, swatterPosition,

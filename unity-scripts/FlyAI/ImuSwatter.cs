@@ -36,6 +36,8 @@ namespace FlyAI
         Vector2 stick;
         bool stickDown;
         bool pressWaiting;
+        Vector3 gravity;
+        bool hasGravity;
 
         // The thumbstick now, or zero if the board has stopped sending, so the player never keeps walking on their own.
         public static ImuReceiver Current { get; private set; }
@@ -45,12 +47,17 @@ namespace FlyAI
         public bool FromNetwork { get; private set; }
 
         // The same readings, arriving from the Pi over Wi-Fi instead of from the USB bridge.
-        public void FeedNetwork(float[] turn, float[] gyro, float[] stickXY, int pressed)
+        public void FeedNetwork(float[] turn, float[] gyro, float[] stickXY, int pressed, float[] down = null)
         {
             if (turn == null || turn.Length < 3) return;
             lock (gate)
             {
                 FromNetwork = true;
+                if (down != null && down.Length >= 3)
+                {
+                    gravity = new Vector3(down[0], down[1], down[2]);
+                    hasGravity = gravity.sqrMagnitude > 0.25f;
+                }
                 pendingRotation += new Vector3(turn[0], turn[1], turn[2]) * Mathf.Rad2Deg;
                 if (gyro != null && gyro.Length >= 3) Gyro = new Vector3(gyro[0], gyro[1], gyro[2]);
                 if (stickXY != null && stickXY.Length >= 2) stick = new Vector2(stickXY[0], stickXY[1]);
@@ -62,6 +69,16 @@ namespace FlyAI
         }
 
         public static bool TakePress() => Current != null && Current.TakeOwnPress();
+        public bool StickDown { get { lock (gate) return Live && stickDown; } }
+        // Which way gravity points on the board (unit vector), from the Pi. False over the USB bridge, which does not send it.
+        public bool TryGravity(out Vector3 g)
+        {
+            lock (gate)
+            {
+                g = gravity;
+                return Live && hasGravity;
+            }
+        }
 
         bool TakeOwnPress()
         {
@@ -146,9 +163,39 @@ namespace FlyAI
         readonly ImuReceiver imu;
         public static float SwingThreshold = 10f;      // m/s^2
         public static int YawAxis = 2, PitchAxis = 1;  // Which device gyro axis turns left/right and up/down.
-        public static float YawSign = 1f, PitchSign = 1f;
+        // Yaw is flipped on this board: turning the swatter left must turn the view left. F6-F9 change these and are saved.
+        public static float YawSign = -1f, PitchSign = 1f;
         public static float Sensitivity = 1f;
         public static float StickForwardSign = 1f, StickTurnSign = 1f;  // F3 / F4 flip them; remembered between runs.
+        // The board's stick sits a quarter turn round: its x is forward-back and its y is turning. F1 swaps them back.
+        public static bool StickSwapAxes = true;
+        public static float StickForward(Vector2 raw) => (StickSwapAxes ? raw.x : raw.y) * StickForwardSign;
+        // Gravity on the board while it is held upright, which is "look straight ahead". It starts along the yaw axis (held
+        // upright, turning left-right spins the board about it); holding the stick press (or Space) re-sets it to now.
+        public static Vector3 Upright;
+        public static bool HasUpright;
+        public static void SetUpright(Vector3 g)
+        {
+            Upright = g.normalized;
+            HasUpright = true;
+            PlayerPrefs.SetFloat("FlyAI.UprightX", Upright.x);
+            PlayerPrefs.SetFloat("FlyAI.UprightY", Upright.y);
+            PlayerPrefs.SetFloat("FlyAI.UprightZ", Upright.z);
+            PlayerPrefs.Save();
+        }
+
+        // How far the board is tilted forward or back from upright, about the pitch axis, in the same sense as gyro aiming.
+        // NaN when it lies on its side and the tilt cannot be read.
+        public static float PitchFromGravity(Vector3 g)
+        {
+            int a = (PitchAxis + 1) % 3, b = (PitchAxis + 2) % 3;
+            var now = new Vector2(g[a], g[b]);
+            var upright = new Vector2(Upright[a], Upright[b]);
+            if (now.magnitude < 0.35f || upright.magnitude < 0.35f) return float.NaN;
+            var delta = Mathf.DeltaAngle(Mathf.Atan2(upright.y, upright.x) * Mathf.Rad2Deg, Mathf.Atan2(now.y, now.x) * Mathf.Rad2Deg);
+            return -delta * PitchSign;   // turning the board by +θ turns gravity by -θ in the board's own axes
+        }
+        public static float StickTurn(Vector2 raw) => (StickSwapAxes ? raw.y : raw.x) * StickTurnSign;
         // Directional swings: the swatter sweeps the way the real swing went (F5 in the sensor panel turns it off).
         public static bool Directional = true;
         public static float StrokeWindow = 0.1f;      // seconds of rotation that say which way the swing is going
@@ -157,6 +204,9 @@ namespace FlyAI
         public int Swings;
         public Vector2 LastStroke;
         float lastSwingAt = -10f;
+        float pressStartedAt = -1f;
+        bool pressRecentered;
+        const float HoldToRecenter = 0.6f;
         readonly System.Collections.Generic.Queue<(float time, Vector2 turn)> recent = new System.Collections.Generic.Queue<(float time, Vector2 turn)>();
 
         public static float Arc(float strength) => Mathf.Lerp(ArcMin, ArcMax, Mathf.Clamp01(strength));
@@ -192,6 +242,34 @@ namespace FlyAI
             frame.aimDelta = new Vector2(rotation[YawAxis] * YawSign, rotation[PitchAxis] * PitchSign) * Sensitivity;
             frame.swing = false;
             var now = Time.unscaledTime;
+
+            // Holding the stick press recenters, like holding Space.
+            if (imu.StickDown)
+            {
+                if (pressStartedAt < 0f) pressStartedAt = now;
+                else if (!pressRecentered && now - pressStartedAt >= HoldToRecenter)
+                {
+                    pressRecentered = true;
+                    frame.recenter = true;
+                }
+            }
+            else
+            {
+                pressStartedAt = -1f;
+                pressRecentered = false;
+            }
+            if (imu.TryGravity(out var g))
+            {
+                if (frame.recenter) SetUpright(g);    // however it is held now becomes straight ahead
+                else if (!HasUpright && Mathf.Abs(g[YawAxis]) > 0.8f)
+                    SetUpright(new Vector3(YawAxis == 0 ? 1 : 0, YawAxis == 1 ? 1 : 0, YawAxis == 2 ? 1 : 0) * Mathf.Sign(g[YawAxis]));   // first time held upright
+                var pitch = HasUpright ? PitchFromGravity(g) : float.NaN;
+                if (!float.IsNaN(pitch))
+                {
+                    frame.hasPitch = true;
+                    frame.pitch = pitch;
+                }
+            }
             recent.Enqueue((now, frame.aimDelta));
             while (recent.Count > 0 && now - recent.Peek().time > StrokeWindow) recent.Dequeue();
             if (imu.FromNetwork)
@@ -288,8 +366,29 @@ namespace FlyAI
         void Awake()
         {
             imu = new ImuReceiver();
-            ImuSwatter.StickForwardSign = PlayerPrefs.GetFloat("FlyAI.StickForward", 1f) < 0f ? -1f : 1f;
-            ImuSwatter.StickTurnSign = PlayerPrefs.GetFloat("FlyAI.StickTurn", 1f) < 0f ? -1f : 1f;
+            var forward = PlayerPrefs.GetFloat("FlyAI.StickForward", 1f) < 0f ? -1f : 1f;
+            var turn = PlayerPrefs.GetFloat("FlyAI.StickTurn", 1f) < 0f ? -1f : 1f;
+            if (!PlayerPrefs.HasKey("FlyAI.StickSwap"))
+            {
+                // Saved before the axes were swapped: each flip belonged to the stick axis that now drives the other control.
+                (forward, turn) = (turn, forward);
+                PlayerPrefs.SetInt("FlyAI.StickSwap", 1);
+                PlayerPrefs.SetFloat("FlyAI.StickForward", forward);
+                PlayerPrefs.SetFloat("FlyAI.StickTurn", turn);
+                PlayerPrefs.Save();
+            }
+            ImuSwatter.StickForwardSign = forward;
+            ImuSwatter.StickTurnSign = turn;
+            ImuSwatter.StickSwapAxes = PlayerPrefs.GetInt("FlyAI.StickSwap", 1) == 1;
+            ImuSwatter.YawAxis = Mathf.Clamp(PlayerPrefs.GetInt("FlyAI.YawAxis", ImuSwatter.YawAxis), 0, 2);
+            ImuSwatter.PitchAxis = Mathf.Clamp(PlayerPrefs.GetInt("FlyAI.PitchAxis", ImuSwatter.PitchAxis), 0, 2);
+            ImuSwatter.YawSign = PlayerPrefs.GetFloat("FlyAI.YawSign", ImuSwatter.YawSign) < 0f ? -1f : 1f;
+            ImuSwatter.PitchSign = PlayerPrefs.GetFloat("FlyAI.PitchSign", ImuSwatter.PitchSign) < 0f ? -1f : 1f;
+            if (PlayerPrefs.HasKey("FlyAI.UprightX"))
+            {
+                ImuSwatter.Upright = new Vector3(PlayerPrefs.GetFloat("FlyAI.UprightX"), PlayerPrefs.GetFloat("FlyAI.UprightY"), PlayerPrefs.GetFloat("FlyAI.UprightZ"));
+                ImuSwatter.HasUpright = ImuSwatter.Upright.sqrMagnitude > 0.25f;
+            }
         }
         void OnDestroy() => imu?.Dispose();
 
@@ -309,14 +408,16 @@ namespace FlyAI
             }
             if (keys == null) return;
             if (keys.f10Key.wasPressedThisFrame) SetSensorControl(swatter == null);
+            if (keys.f1Key.wasPressedThisFrame)
+                PlayerPrefs.SetInt("FlyAI.StickSwap", (ImuSwatter.StickSwapAxes = !ImuSwatter.StickSwapAxes) ? 1 : 0);
             if (keys.f2Key.wasPressedThisFrame) showPanel = !showPanel;
             if (keys.f3Key.wasPressedThisFrame) PlayerPrefs.SetFloat("FlyAI.StickForward", ImuSwatter.StickForwardSign = -ImuSwatter.StickForwardSign);
             if (keys.f4Key.wasPressedThisFrame) PlayerPrefs.SetFloat("FlyAI.StickTurn", ImuSwatter.StickTurnSign = -ImuSwatter.StickTurnSign);
             if (keys.f5Key.wasPressedThisFrame) ImuSwatter.Directional = !ImuSwatter.Directional;
-            if (keys.f6Key.wasPressedThisFrame) ImuSwatter.YawAxis = (ImuSwatter.YawAxis + 1) % 3;
-            if (keys.f7Key.wasPressedThisFrame) ImuSwatter.PitchAxis = (ImuSwatter.PitchAxis + 1) % 3;
-            if (keys.f8Key.wasPressedThisFrame) ImuSwatter.YawSign = -ImuSwatter.YawSign;
-            if (keys.f9Key.wasPressedThisFrame) ImuSwatter.PitchSign = -ImuSwatter.PitchSign;
+            if (keys.f6Key.wasPressedThisFrame) PlayerPrefs.SetInt("FlyAI.YawAxis", ImuSwatter.YawAxis = (ImuSwatter.YawAxis + 1) % 3);
+            if (keys.f7Key.wasPressedThisFrame) PlayerPrefs.SetInt("FlyAI.PitchAxis", ImuSwatter.PitchAxis = (ImuSwatter.PitchAxis + 1) % 3);
+            if (keys.f8Key.wasPressedThisFrame) PlayerPrefs.SetFloat("FlyAI.YawSign", ImuSwatter.YawSign = -ImuSwatter.YawSign);
+            if (keys.f9Key.wasPressedThisFrame) PlayerPrefs.SetFloat("FlyAI.PitchSign", ImuSwatter.PitchSign = -ImuSwatter.PitchSign);
             if (keys.f11Key.wasPressedThisFrame) ImuSwatter.SwingThreshold = Mathf.Max(2f, ImuSwatter.SwingThreshold - 2f);
             if (keys.f12Key.wasPressedThisFrame) ImuSwatter.SwingThreshold += 2f;
             if (swatter != null && swatter.Swings != lastSwings) { lastSwings = swatter.Swings; lastSwingAt = Time.time; }
@@ -332,9 +433,11 @@ namespace FlyAI
                        $"gyro  x {imu.Gyro.x,6:0.00}  y {imu.Gyro.y,6:0.00}  z {imu.Gyro.z,6:0.00} rad/s\n" +
                        $"accel {imu.Linear.magnitude,5:0.0} m/s²   peak {peak,5:0.0}   swing above {ImuSwatter.SwingThreshold:0} (F11/F12)\n" +
                        "sensor control: " + (swatter != null ? "<color=#6f6>ON</color>" : "off") + " (F10)   yaw = gyro " + axes[ImuSwatter.YawAxis] + (ImuSwatter.YawSign < 0 ? " flipped" : "") + " (F6/F8)   pitch = gyro " + axes[ImuSwatter.PitchAxis] + (ImuSwatter.PitchSign < 0 ? " flipped" : "") + " (F7/F9)\n" +
-                       $"stick x {imu.StickValue.x:0.00} y {imu.StickValue.y:0.00} (F3/F4 flip)   swings " + (swatter != null ? swatter.Swings : 0) + (Time.time - lastSwingAt < 0.6f ? "   <color=#ff6><b>SWING!</b></color>" : "") + "\n" +
+                       $"stick x {imu.StickValue.x:0.00} y {imu.StickValue.y:0.00} -> forward {ImuSwatter.StickForward(imu.StickValue):0.00} turn {ImuSwatter.StickTurn(imu.StickValue):0.00} " +
+                       $"(F1 swap{(ImuSwatter.StickSwapAxes ? "ped" : "")}, F3/F4 flip)   swings " + (swatter != null ? swatter.Swings : 0) + (Time.time - lastSwingAt < 0.6f ? "   <color=#ff6><b>SWING!</b></color>" : "") + "\n" +
+                       (imu.TryGravity(out var down) ? $"gravity {down.x:0.00} {down.y:0.00} {down.z:0.00}  tilt {ImuSwatter.PitchFromGravity(down):0} deg (hold the stick press upright to reset)\n" : "") +
                        "directional swings " + (ImuSwatter.Directional ? "<color=#6f6>ON</color>" : "off") + " (F5)   last swing " + (swatter != null && swatter.Swings > 0 ? ImuSwatter.Describe(swatter.LastStroke) : "-");
-            var rect = new Rect(12f, Screen.height * 0.5f - 40f, 640f, 110f);
+            var rect = new Rect(12f, Screen.height * 0.5f - 40f, 700f, 130f);
             GUI.color = new Color(0f, 0f, 0f, 0.6f);
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = Color.white;

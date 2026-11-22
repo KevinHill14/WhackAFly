@@ -40,8 +40,10 @@ def parse_controller(m):
 
 
 class ControllerState:
-    """Adds up the swatter's rotation between messages to Unity, so no aim movement is lost."""
+    """Adds up the swatter's rotation between messages to Unity, so no aim movement is lost, and keeps which way
+    gravity points on the board, so Unity can set the up-down aim from how the swatter is tilted."""
     DEADZONE = 0.04    # rad/s: tiny rates are sensor noise and would make the aim creep
+    GRAVITY_TAU = 0.2  # s: smoothing that keeps swings and shakes out of the gravity direction
 
     def __init__(self):
         self.reset()
@@ -53,14 +55,22 @@ class ControllerState:
         self.stick = [0.0, 0.0]
         self.down = False
         self.pressed = False
+        self.gravity = None
 
-    def update(self, t_ms, gyro, stick_x, stick_y, down):
+    def update(self, t_ms, gyro, stick_x, stick_y, down, accel=None):
+        dt = None
         if self.last_t is not None:
             dt = (t_ms - self.last_t) / 1000.0
             if 0.0 < dt <= 0.1:
                 for k in range(3):
                     if abs(gyro[k]) > self.DEADZONE:
                         self.turn[k] += gyro[k] * dt
+        if accel is not None:
+            if self.gravity is None or dt is None or not 0.0 < dt <= 0.1:
+                self.gravity = list(accel)
+            else:
+                a = min(1.0, dt / self.GRAVITY_TAU)
+                self.gravity = [g + a * (v - g) for g, v in zip(self.gravity, accel)]
         self.last_t = t_ms
         self.gyro = list(gyro)
         self.stick = [stick_x, stick_y]
@@ -70,6 +80,9 @@ class ControllerState:
     def take(self):
         msg = {"type": "controller", "dg": [round(v, 5) for v in self.turn], "g": [round(v, 3) for v in self.gyro],
                "s": [round(v, 3) for v in self.stick], "b": 1 if self.pressed else 0}
+        size = math.sqrt(sum(v * v for v in self.gravity)) if self.gravity else 0.0
+        if size > 1e-6:
+            msg["a"] = [round(v / size, 3) for v in self.gravity]    # unit vector, board axes
         self.turn = [0.0, 0.0, 0.0]
         self.pressed = self.down
         return msg

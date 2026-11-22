@@ -8,6 +8,9 @@ namespace FlyAI
         public float forward;
         public float turn;
         public Vector2 aimDelta;
+        // The up-down aim the swatter's tilt asks for (degrees), when hasPitch: held upright is straight ahead.
+        public bool hasPitch;
+        public float pitch;
         public bool swing;
         public float swingStrength;
         // Which way the real swing went, in degrees of aim (x = right, y = up). The swatter sweeps that far along it
@@ -112,8 +115,10 @@ namespace FlyAI
 
             // The thumbstick is the main way to walk and turn; WASD is the backup for whatever the stick is not doing.
             var stick = ImuReceiver.LiveStick;
-            if (stick.y != 0f) frame.forward = stick.y * ImuSwatter.StickForwardSign;
-            if (stick.x != 0f) frame.turn = stick.x * ImuSwatter.StickTurnSign;
+            var forward = ImuSwatter.StickForward(stick);
+            var turn = ImuSwatter.StickTurn(stick);
+            if (forward != 0f) frame.forward = forward;
+            if (turn != 0f) frame.turn = turn;
 
             if (mouse != null)
             {
