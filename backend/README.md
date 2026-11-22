@@ -64,13 +64,11 @@ A watchdog reports the link: `never` (nothing has connected), `ok`, or `lost` (n
 When the link comes back the classifier restarts, since its gravity estimate is stale.
 
 **Using the current ESP32 firmware** (on the `firmware` branch, which this branch does not change):
-it connects to the Pi on port 8765, which is the brain's port, and the Pi address is written into
-the code. Either set its `PI_PORT` to 8767, or run the backend in a compatible layout with
-`BRAIN_PORT=8780 ESP32_PORT=8765 sh backend/start.sh` (then anything that talks to the brain
-directly, such as Unity's `FLYAI_BRAIN`, must use 8780). The Pi's address comes from DHCP and can
-change; reserve it on the hotspot or router, or the swatter will silently fail to connect.
-That firmware also contains Wi-Fi passwords in plain text (`firmware/src/main.cpp`, `src/pi_esp.cpp`);
-they should be moved out of the repository and changed.
+it connects to the Pi on port 8767, the backend's swatter-data receiver, and the Pi address is
+written into the code. The Pi's address comes from DHCP and can change; reserve it on the hotspot
+or router, or the swatter will silently fail to connect. That firmware also contains Wi-Fi
+passwords in plain text (`firmware/src/main.cpp`); they should be moved out of the repository and
+changed.
 
 **Collecting training data** (standard library only, runs on the Pi; stop the backend first, or pass `--port`):
 

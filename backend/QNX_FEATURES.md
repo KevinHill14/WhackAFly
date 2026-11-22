@@ -51,12 +51,11 @@ them, then see "Other branches" below for the natural place to add one.
 I read the file lists of the other branches and the Pi code on `firmware`, not their
 full code, so treat these as pointers.
 
-- **`firmware` (teammate's Pi communication work).** Most useful. `pi_server/collect_training_data.py`
-  runs on the Pi and receives about 200 IMU samples a second over WebSocket.
+- **`firmware` (teammate's Pi communication work).** Most useful. `backend/collect.py`
+  runs on the Pi and receives about 200 IMU samples a second over WebSocket, on port 8767
+  (the firmware was pointed there to avoid clashing with the brain's 8765).
   - It could call `qnx.set_realtime()` and `qnx.log()` so sample gaps are logged, and
     `qnx.Latency` to measure the sample interval. Jitter in training data matters.
-  - **Port clash:** it listens on 8765, which is also the brain's port. One of them has to move
-    (the brain takes `--port`, and `start.sh` takes `BRAIN_PORT`).
   - This is also where a gesture classifier would go, and where `ncnn`, `opencv` (dnn) or
     `mediapipe` from the QNX repository could be the open-source AI module.
 - **`brain-server`.** The brain server has the 50 ms deadline and failover logic. It could call
