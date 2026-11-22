@@ -21,7 +21,6 @@ The game also works as a small demonstration of a bigger idea. Drones, robots, a
 - [Leaderboard](#leaderboard)
 - [Running it](#running-it)
 - [Testing](#testing)
-- [Known limitations](#known-limitations)
 - [Repository layout](#repository-layout)
 - [Credits and data sources](#credits-and-data-sources)
 
@@ -68,17 +67,6 @@ flowchart LR
 ```
 
 **Division of responsibility.** The Pi owns the fly: its personality, senses, decisions, movement, and the round state. Unity draws the world and reports what only a renderer can know, such as brightness at the fly's position, the flashlight beam, room events, clear flight paths, and what the swatter physically touched.
-
-**Ports**
-
-| Port | Protocol | Purpose |
-|---|---|---|
-| 8765 | WebSocket | Fly brain |
-| 8766 | WebSocket | Game backend to Unity |
-| 8767 | WebSocket | ESP32 swatter sample stream |
-| 8768 | HTTP | Optional leaderboard API |
-| 8080 | HTTP | Phone scan upload |
-| 9000 | UDP | Optional swatter events |
 
 **Graceful degradation.** Each link has a fallback, so a failed component reduces fidelity and the game keeps running.
 
@@ -144,13 +132,6 @@ Measured in real time on `subnet_t5`, with events 1.5 s apart:
 | Glass after 6 s of silence | | 0.88 to 0.98 |
 
 Only input above 0.4 causes fatigue, so a swatter merely held nearby never dulls the reflex. Fatigue also stays on its own channel, which means noise in the left ear leaves the eyes and right ear at full sensitivity. These parameters were tuned for gameplay and were not fitted to biological recordings.
-
-### Modeling decisions worth noting
-
-- **Giant Fiber sign.** Annotations disagree on the left and right DNp01 transmitters at low confidence (0.32 and 0.27). We treat both as excitatory, matching the known biology and preventing a false left or right bias.
-- **Per-eye calibration.** The right eye drives the escape neurons about 1.6 times harder in this data, so calibration scales its input to keep both directions fair.
-- **Ear asymmetry.** The right ear has 127 direct synapses onto its Giant Fiber and the left has 14. Matching them requires a large left-ear gain (13.7x on `subnet_t10`), which exceeds real neuron firing rates and exists purely to keep gameplay symmetric.
-- **Chemical synapses only.** FlyWire does not include electrical synapses, so the real reflex may be faster or stronger than this model.
 
 ## The fly's behavior
 
@@ -261,8 +242,6 @@ Processing covers:
 - **Lighting:** one ceiling lamp per 35 m² (up to 10), one table lamp per 40 m² (1 to 6), and up to 2 candles.
 - **Decor and sound:** about one wall piece per 4.5 m of wall (up to 8), plus 2 or 3 sound sources tied to real objects such as a TV, fridge, or sink when available.
 - **Landing spots:** up to 400, each kept only if the player can reach it with the swatter from walkable floor along a clear line.
-
-**Optional AI cleanup.** With `--ai`, Claude reviews a text summary of the room (dimensions, labels, positions) and proposes up to 30 small remove, move, or swap edits. The mesh never leaves the machine. Every edit is rechecked against the placement rules, and any layout that loses more than 5 points of light coverage is rejected in favor of the rule-based result.
 
 ## The Unity game
 
@@ -384,18 +363,6 @@ Selected brain results on the laptop with `subnet_t5`:
 | Abrupt client crashes | Clean recovery from 10 of 10 |
 | 90 s soak | Memory flat at 58 MB |
 
-## Known limitations
-
-- **The eyes are simulated.** The looming signal comes from the swatter's position in the game. The reflex circuit is real connectome data, and no camera feeds it.
-- **Swing to screen takes about 155 to 216 ms.** Around 135 ms of that is the classifier waiting for the end of its post-peak window.
-- **Bumps are the weakest class.** About half of deliberate bumps still register as swings, and more bump recordings would help.
-- **The Pi's Wi-Fi driver can hang** during long sessions and needs a power cycle to recover.
-- **Real-time priority is off by default** because priority 20 starved the Wi-Fi stack.
-- **Only one Unity client** should connect to the Pi, since a second one resets the shared round.
-- **The fallback table comes from `subnet_t5`** while the Pi runs `subnet_t10`, so their group labels differ at positions 4 to 7. `brain/build_lookup.py` can rebuild it.
-- **Sound tops out near 0.78 strength** on `subnet_t10`, below the full-strength response of the larger network.
-- **Two backend tests fail on Windows** (the stats rate check and the data collector test). The other 63 pass.
-
 ## Repository layout
 
 ```text
@@ -415,8 +382,6 @@ Selected brain results on the laptop with `subnet_t5`:
 └── qnx.md            QNX track notes
 ```
 
-The codebase holds about 10,700 lines of Python, 12,200 lines of C#, and 700 lines of C++. When changing game code, edit `unity-scripts/FlyAI/` and copy it into `WhackAFlyGame/Assets/FlyAI/`, keeping both versions in sync.
-
 ## Credits and data sources
 
 - **Connectome:** [FlyWire](https://flywire.ai) v783 and its neuron annotations.
@@ -425,6 +390,6 @@ The codebase holds about 10,700 lines of Python, 12,200 lines of C#, and 700 lin
 - **3D models:** [Poly Haven](https://polyhaven.com), CC0. See [`CREDITS.txt`](WhackAFlyGame/Assets/FlyAI/Art/CREDITS.txt).
 - **Sound effects and announcer:** generated with [ElevenLabs](https://elevenlabs.io).
 - **Room scanning:** [Polycam](https://poly.cam).
-- **Built with:** Unity, QNX, TensorFlow Lite, NumPy, PlatformIO, TimescaleDB on Tiger Cloud, and Claude.
+- **Built with:** Unity, QNX, TensorFlow Lite, NumPy, and PlatformIO.
 
-Built at Hack Western.
+Built at Hack Western 13.
